@@ -1,0 +1,12 @@
+# Секреты
+.env
+service_account.json
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Виртуальное окружение
+venv/
+env/
