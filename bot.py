@@ -40,8 +40,7 @@ REPORT_HOUR, REPORT_MINUTE = map(int, os.getenv("REPORT_TIME", "20:00").split(":
 # Подключение к Google Sheets
 # ======================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
-CREDS = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+CREDS = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 GC = gspread.authorize(CREDS)
 SHEET = GC.open_by_key(GOOGLE_SHEET_ID).sheet1
 
@@ -154,7 +153,7 @@ def has_sorokin_tag(user_id: int) -> str:
 
 def extract_priority(text: str) -> str:
     text_lower = text.lower()
-    if "#высокий" in text_lower or "#срочно" in text_lower:
+    if "#в" in text_lower or "#с" in text_lower:
         return "Высокий"
     elif "#низкий" in text_lower:
         return "Низкий"
@@ -170,6 +169,16 @@ def format_task_message(task_data, status_line=""):
     assigned = task_data.get("assigned_str", "")
     completed = task_data.get("completed_str", "")
     executor = task_data.get("executor", "")
+    status = task_data["status"]
+    
+    # Добавляем иконку к статусу
+    status_with_icon = status
+    if status == "Не распределено":
+        status_with_icon = "🔴 Не распределено"
+    elif status == "В работе":
+        status_with_icon = "🟠 В работе"
+    elif status == "Выполнено":
+        status_with_icon = "🟢 Выполнено"
 
     lines = [f"Задача #{task_data['id']}\n"]
     lines.append(f"Автор: {author}")
