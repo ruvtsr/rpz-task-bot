@@ -40,7 +40,8 @@ REPORT_HOUR, REPORT_MINUTE = map(int, os.getenv("REPORT_TIME", "20:00").split(":
 # Подключение к Google Sheets
 # ======================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-CREDS = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
+CREDS = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 GC = gspread.authorize(CREDS)
 SHEET = GC.open_by_key(GOOGLE_SHEET_ID).sheet1
 
