@@ -97,7 +97,8 @@ logger.info(
 # ======================
 # Подключение к Google Sheets
 # ======================
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/drive"]
 CREDS = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
 GC = gspread.authorize(CREDS)
 SHEET = GC.open_by_key(GOOGLE_SHEET_ID).sheet1
