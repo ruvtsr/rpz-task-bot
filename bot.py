@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, MessageHandler, CommandHandler, filters,
-    ContextTypes, CallbackContext
+    ContextTypes, CallbackContext, CallbackQueryHandler  # ← КРИТИЧЕСКИ ВАЖНО!
 )
 import gspread
 from google.oauth2.service_account import Credentials
