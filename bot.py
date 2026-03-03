@@ -55,6 +55,7 @@ UNASSIGNED_REPORT_INTERVAL = int(os.getenv("UNASSIGNED_REPORT_INTERVAL", "30"))
 URGENT_UNASSIGNED_DELAY = int(os.getenv("URGENT_UNASSIGNED_DELAY", "5"))
 URGENT_UNASSIGNED_INTERVAL = int(os.getenv("URGENT_UNASSIGNED_INTERVAL", "5"))
 OVERDUE_HOURS_THRESHOLD = int(os.getenv("OVERDUE_HOURS_THRESHOLD", "24"))
+STALE_CHECK_INTERVAL = int(os.getenv("STALE_CHECK_INTERVAL", "30")) # <-- ДОБАВЛЕНО
 
 # Настраиваемые лимиты зависших задач (в минутах)
 STALE_HIGH_PRIORITY_MINUTES = int(os.getenv("STALE_HIGH_PRIORITY_MINUTES", "60"))
@@ -204,7 +205,6 @@ STATUS_ICONS = {
     "в работе": "🟠 В работе",
     "выполнено": "🟢 Выполнено",
     "операционная задача": "🔵 Операционная задача",
-    "опер. задача": "🔵 Операционная задача",
 }
 
 def format_task_message(task_data, status_line=""):
@@ -438,7 +438,7 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
 
     # 2. Heatmap активности
     fig2, ax2 = plt.subplots(figsize=(12, 6))
-    # Исправленный заголовок столбца для времени
+    # ИСПРАВЛЕНО: Используем 'Время' вместо 'Время создания'
     tasks_df['created_time'] = pd.to_datetime(tasks_df['Время'], format='%H:%M:%S', errors='coerce').dt.hour
     tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce')
     tasks_df['weekday'] = tasks_df['created_date'].dt.dayofweek
@@ -812,7 +812,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = user.id
 
-    if data.startswith("toggle_digest_pm_"):
+    if data_pm_"):
         current = user_settings.get(user_id, {}).get("digest_pm", False)
         new_value = "нет" if current else "да"
         save_user_setting(user_id, f"@{user.username}" if user.username else user.full_name, "digest_pm", new_value)
@@ -1671,7 +1671,6 @@ async def check_stale_in_progress(context: CallbackContext):
                 })
 
         if stale_tasks:
-            lines = [
                 "⏳ Задачи 'В РАБОТЕ' превысили допустимый лимит:",
                 ""
             ]
@@ -1733,9 +1732,7 @@ async def morning_digest(context: CallbackContext):
         stale = []
         for r in all_records:
             if r.get("Статус", "").strip() != "В работе":
-                continue
-            try:
-                assigned_dt = datetime.strptime(r.get("Дата время назначения", ""), "%Y-%m-%d %H:%M:%S")
+                continue                assigned_dt = datetime.strptime(r.get("Дата время назначения", ""), "%Y-%m-%d %H:%M:%S")
                 assigned_dt = timezone('Europe/Moscow').localize(assigned_dt)
                 elapsed_minutes = (moscow_now - assigned_dt).total_seconds() / 60
                 priority = r.get("Приоритет", "Средний").strip()
@@ -1745,8 +1742,7 @@ async def morning_digest(context: CallbackContext):
                 max_minutes = STALE_HIGH_PRIORITY_MINUTES if priority == "Высокий" else \
                               STALE_MEDIUM_PRIORITY_MINUTES if priority == "Средний" else \
                               STALE_LOW_PRIORITY_MINUTES
-                if elapsed_minutes > max_minutes:
-                    stale.append(r)
+                if elapsed_minutes > max_minutes(r)
             except:
                 continue
 
@@ -1770,7 +1766,7 @@ async def morning_digest(context: CallbackContext):
         else:
             lines = ["🌅 УТРЕННИЙ ДАЙДЖЕСТ (рабочий день)", ""]
             if urgent_unassigned:
-                lines.append(f"🚨 НЕРАСПРЕДЕЛЁННЫЕ СРОЧНЫЕ ЗАДАЧИ ({len(urgent_unassigned)}):")
+                lines.append(f"🚨 НЕРАСПРЕНЫЕ СРОЧНЫЕ ЗАДАЧИ ({len(urgent_unassigned)}):")
                 for task in urgent_unassigned:
                     lines.append(f"  • {task.get('ID', '—')} — {task.get('Тема задачи', '—')}")
                 lines.append("")
@@ -2038,8 +2034,7 @@ async def weekly_digest(app: Application):
             "low": priority_counts.get("Низкий", 0),
             "operational": len(operational_tasks),
             "overdue": len(weekly_tasks) - len(completed_on_time),
-            "stale": len(stale_tasks),
-            "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
+            "stale": len(st "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
             "on_time_percent": round(on_time_percent, 1),
             "note": "Еженедельный дайджест с визуализацией"
         }
@@ -2324,7 +2319,7 @@ def main():
     scheduler.add_job(
         check_stale_in_progress,
         'interval',
-        minutes=STALE_CHECK_INTERVAL,
+        minutes=STALE_CHECK_INTERVAL, # <-- ИСПОЛЬЗУЕТСЯ ИСПРАВЛЕННАЯ ПЕРЕМЕННАЯ
         args=[application],
         id='stale_check'
     )
