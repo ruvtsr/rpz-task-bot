@@ -386,7 +386,6 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         # 1. График выполнения по дням
         fig1, ax1 = plt.subplots(figsize=(10, 5))
         
-        # ← ОПТИМИЗАЦИЯ: используем векторные операции вместо iterrows
         tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce').dt.date
         daily_stats = tasks_df.groupby('created_date')['Статус'].value_counts().unstack(fill_value=0)
         
@@ -410,7 +409,6 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         plt.tight_layout()
         
         chart_buf = io.BytesIO()
-        # ← ОПТИМИЗАЦИЯ: снижен DPI для ускорения
         plt.savefig(chart_buf, format='png', dpi=100, bbox_inches='tight')
         plt.close(fig1)
         chart_buf.seek(0)
@@ -418,16 +416,16 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         # 2. Heatmap активности (оптимизированный)
         fig2, ax2 = plt.subplots(figsize=(12, 6))
         
-        # ← ОПТИМИЗАЦИЯ: векторная обработка вместо iterrows
+        # ✅ ИСПРАВЛЕНО: 'Время создания' → 'Время'
         tasks_df['created_time'] = pd.to_datetime(
-            tasks_df['Время'], 
-            format='%H:%M:%S', 
+            tasks_df['Время'],
+            format='%H:%M:%S',
             errors='coerce'
         ).dt.hour
         tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce')
         tasks_df['weekday'] = tasks_df['created_date'].dt.dayofweek
         
-        # ← ОПТИМИЗАЦИЯ: используем groupby вместо цикла
+        # Векторная обработка вместо iterrows
         heatmap_data = tasks_df.groupby(['weekday', 'created_time']).size().unstack(fill_value=0)
         heatmap_array = np.zeros((7, 24))
         
@@ -440,12 +438,12 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         hours = [f'{h:02d}:00' for h in range(24)]
         
         sns.heatmap(
-            heatmap_array, 
-            ax=ax2, 
-            cmap='YlOrRd', 
+            heatmap_array,
+            ax=ax2,
+            cmap='YlOrRd',
             cbar_kws={'label': 'Количество задач'},
-            xticklabels=hours, 
-            yticklabels=days, 
+            xticklabels=hours,
+            yticklabels=days,
             linewidths=0.5
         )
         
@@ -456,7 +454,6 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         plt.tight_layout()
         
         heatmap_buf = io.BytesIO()
-        # ← ОПТИМИЗАЦИЯ: снижен DPI для ускорения
         plt.savefig(heatmap_buf, format='png', dpi=100, bbox_inches='tight')
         plt.close(fig2)
         heatmap_buf.seek(0)
@@ -1714,6 +1711,9 @@ async def weekly_digest(app: Application):
     week_start = moscow_now.date() - timedelta(days=moscow_now.weekday() + 7)
     week_end = week_start + timedelta(days=6)
     
+    # ← ДОБАВЛЕНО: инициализация message в начале функции
+    message = "📊 Еженедельный дайджест"
+    
     try:
         all_records = await safe_get_all_records()
         tasks_df = pd.DataFrame(all_records)
@@ -1745,16 +1745,91 @@ async def weekly_digest(app: Application):
         else:
             viz_tasks = weekly_tasks
         
-        # ... остальной код статистики ...
+        priority_counts = weekly_tasks['Приоритет'].value_counts()
+        operational_tasks = weekly_tasks[
+            weekly_tasks['Статус'].apply(lambda s: "операционная задача" in str(s).lower() or "опер. задача" in str(s).lower())
+        ]
+        regular_tasks = weekly_tasks[~weekly_tasks['Статус'].apply(lambda s: "операционная задача" in str(s).lower() or "опер. задача" in str(s).lower())]
+        completed_on_time = regular_tasks[
+            (regular_tasks['Статус'] == 'Выполнено') &
+            (pd.to_datetime(regular_tasks['Дата время выполнения'], errors='coerce').dt.date <= week_end)
+        ]
+        total_created = len(weekly_tasks)
+        on_time_percent = (len(completed_on_time) / len(regular_tasks) * 100) if len(regular_tasks) > 0 else 0
+        
+        stale_tasks = []
+        for _, task in weekly_tasks.iterrows():
+            status = str(task['Статус']).lower()
+            if "операционная задача" in status or "опер. задача" in status:
+                continue
+            if task['Статус'] in ['В работе', 'Не распределено']:
+                try:
+                    # ✅ ИСПРАВЛЕНО: 'Время создания' → 'Время'
+                    created_dt = datetime.strptime(
+                        f"{task['Дата создания']} {task.get('Время', '00:00:00')}",
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    created_dt = timezone('Europe/Moscow').localize(created_dt)
+                    elapsed_hours = (moscow_now - created_dt).total_seconds() / 3600
+                    priority = task['Приоритет']
+                    limit = {
+                        'Высокий': STALE_HIGH_PRIORITY_LIMIT,
+                        'Средний': STALE_MEDIUM_PRIORITY_LIMIT,
+                        'Низкий': STALE_LOW_PRIORITY_LIMIT
+                    }.get(priority, 24)
+                    if elapsed_hours > limit:
+                        stale_tasks.append({
+                            'id': task['ID'],
+                            'topic': task['Тема задачи'],
+                            'priority': priority,
+                            'hours': round(elapsed_hours, 1),
+                            'executor': task.get('Исполнитель', '—')
+                        })
+                except:
+                    continue
+        
+        stale_tasks = sorted(stale_tasks, key=lambda x: x['hours'], reverse=True)[:3]
+        
+        # ← Формирование message
+        lines = [
+            f"📊 ЕЖЕНЕДЕЛЬНЫЙ ДАЙДЖЕСТ",
+            f"Период: {week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m')}",
+            "",
+            f"📈 Создано задач: {total_created}",
+            f"✅ Выполнено в срок: {len(completed_on_time)} ({on_time_percent:.1f}%)",
+            f"🔵 Операционные задачи: {len(operational_tasks)}",
+            ""
+        ]
+        lines.append("📌 Распределение по приоритетам:")
+        for prio in ['Высокий', 'Средний', 'Низкий']:
+            count = priority_counts.get(prio, 0)
+            oper_count = len(operational_tasks[operational_tasks['Приоритет'] == prio])
+            if count > 0:
+                if oper_count > 0:
+                    lines.append(f"  • {prio}: {count} (в т.ч. {oper_count} операционные)")
+                else:
+                    lines.append(f"  • {prio}: {count}")
+        lines.append("")
+        if stale_tasks:
+            lines.append("⚠️ Топ-3 самых долгих задач (исключая операционные):")
+            for i, task in enumerate(stale_tasks, 1):
+                exec_info = f" (исполнитель: {task['executor']})" if task['executor'] != '—' else ""
+                lines.append(
+                    f"  {i}. {task['id']} [{task['priority']}] — {task['hours']}ч{exec_info}\n"
+                    f"     {task['topic'][:50]}..."
+                )
+            lines.append("")
+        lines.append("📎 Визуализация активности прикреплена ниже")
+        message = "\n".join(lines)
         
         try:
             # ← ДОБАВЛЕНО: таймаут на генерацию графиков
             chart_buf, heatmap_buf = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
-                    None, 
-                    generate_weekly_charts, 
-                    viz_tasks, 
-                    week_start, 
+                    None,
+                    generate_weekly_charts,
+                    viz_tasks,
+                    week_start,
                     week_end
                 ),
                 timeout=30  # 30 секунд максимум
@@ -1772,7 +1847,20 @@ async def weekly_digest(app: Application):
                 caption="🌡️ Heatmap активности по дням недели и часам"
             )
             
-            # ... логирование метрик ...
+            metrics = {
+                "period": f"{week_start.strftime('%Y-%m-%d')} - {week_end.strftime('%Y-%m-%d')}",
+                "total": total_created,
+                "high": priority_counts.get("Высокий", 0),
+                "medium": priority_counts.get("Средний", 0),
+                "low": priority_counts.get("Низкий", 0),
+                "operational": len(operational_tasks),
+                "overdue": len(weekly_tasks) - len(completed_on_time),
+                "stale": len(stale_tasks),
+                "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
+                "on_time_percent": round(on_time_percent, 1),
+                "note": "Еженедельный дайджест с визуализацией"
+            }
+            log_digest_metrics("weekly", metrics)
             logger.info(f"Еженедельный дайджест отправлен за период {week_start} - {week_end}")
             
         except asyncio.TimeoutError:
