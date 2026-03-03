@@ -645,14 +645,15 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Не удалось отправить в личку: {e}")
         await update.message.reply_text("⚠️ Напишите боту в личку /start.")
 
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_stats(update: Update, context_TYPE):
     user = update.effective_user
     try:
         all_records = await get_cached_sheet_data()
         total = len(all_records)
         completed = sum(1 for r in all_records if r.get("Статус") == "Выполнено")
         pending = sum(1 for r in all_records if r.get("Статус") == "Не распределено")
-        operational = sum(1 for r in all_records if "операционная задача" in str(r.get("Статус", "")).lower() or "опер. задача" in str(r.get("Статус())
+        # ИСПРАВЛЕНО: Правильное закрытие скобок и кавычек
+        operational = sum(1 for r in all_records if "операционная задача" in str(r.get("Статус", "")).lower() or "опер. задача" in str(r.get("Статус", "")).lower())
         in_progress = total - completed - pending - operational
         today = datetime.now(timezone('Europe/Moscow')).strftime("%Y-%m-%d")
         created_today = sum(1 for r in all_records if r.get("Дата создания") == today)
