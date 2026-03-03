@@ -812,7 +812,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = user.id
 
-    if data_pm_"):
+    if data.startswith("toggle_digest_pm_"):
         current = user_settings.get(user_id, {}).get("digest_pm", False)
         new_value = "нет" if current else "да"
         save_user_setting(user_id, f"@{user.username}" if user.username else user.full_name, "digest_pm", new_value)
