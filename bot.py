@@ -12,8 +12,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-from typing import Optional, Dict, Tuple
-from functools import wraps
+from typing import Optional, Dict, Tuple wraps
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -200,11 +199,13 @@ async def get_cached_sheet_data():
 # ======================
 # Форматирование сообщения задачи
 # ======================
+# ИСПРАВЛЕНО: Удалён "опер. задача", если он не нужен
 STATUS_ICONS = {
     "не распределено": "🔴 Не распределено",
     "в работе": "🟠 В работе",
     "выполнено": "🟢 Выполнено",
     "операционная задача": "🔵 Операционная задача",
+    # "опер. задача": "🔵 Операционная задача", # <-- УДАЛЕНО, ЕСЛИ НЕ НУЖНО
 }
 
 def format_task_message(task_data, status_line=""):
@@ -221,7 +222,7 @@ def format_task_message(task_data, status_line=""):
 
     # Надёжное определение иконки
     status_lower = status.lower()
-    status_with_icon = STATUS_ICONS.get(status_lower, status)
+    status_ICONS.get(status_lower, status)
 
     lines = [f"Задача #{task_data['id']}", ""]
     lines.append(f"Автор: {author}")
@@ -255,7 +256,7 @@ def extract_priority(text: str) -> str:
     low_priority_triggers = ["#н ", "#низкий", "#low"]
     if any(trigger in text_lower for trigger in high_priority_triggers):
         return "Высокий"
-    elif any(trigger in text_lower for trigger in low_priority_triggers):
+    elif any(trigger in text_lower for trigger in):
         return "Низкий"
     else:
         return "Средний"
@@ -651,7 +652,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(all_records)
         completed = sum(1 for r in all_records if r.get("Статус") == "Выполнено")
         pending = sum(1 for r in all_records if r.get("Статус") == "Не распределено")
-        operational = sum(1 for r in all_records if "операционная задача" in str(r.get("Статус", "")).lower() or "опер. задача" in str(r.get("Статус", "")).lower())
+        operational = sum(1 for r in all_records if "операционная задача" in str(r.get("Статус", "")).lower() or "опер. задача" in str(r.get("Статус())
         in_progress = total - completed - pending - operational
         today = datetime.now(timezone('Europe/Moscow')).strftime("%Y-%m-%d")
         created_today = sum(1 for r in all_records if r.get("Дата создания") == today)
@@ -801,6 +802,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
+# --- ИСПРАВЛЕНО: Правильный синтаксис в settings_callback ---
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатия кнопок настроек"""
     query = update.callback_query
@@ -931,7 +933,7 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- НОВАЯ КОМАНДА: Ручной запуск еженедельного дайджеста ---
 async def cmd_weekly_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # (Опционально) Проверка, что команда вызвана администратором или из нужного чата
+    # (Опционально) Проверка, что команда вызваном или из нужного чата
     # if user.id != YOUR_ADMIN_ID:
     #     await update.message.reply_text("❌ Недостаточно прав.")
     #     return
@@ -972,7 +974,7 @@ async def handle_new_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     key = (user.id, chat_id, None)
     if key in pending_tasks:
-        pending_tasks[key]["desc_parts"].append(text)
+        pending_parts"].append(text)
         pending_tasks[key]["msg_ids"].append(message.message_id)
         return
 
@@ -1671,6 +1673,7 @@ async def check_stale_in_progress(context: CallbackContext):
                 })
 
         if stale_tasks:
+            lines = [
                 "⏳ Задачи 'В РАБОТЕ' превысили допустимый лимит:",
                 ""
             ]
@@ -1732,7 +1735,9 @@ async def morning_digest(context: CallbackContext):
         stale = []
         for r in all_records:
             if r.get("Статус", "").strip() != "В работе":
-                continue                assigned_dt = datetime.strptime(r.get("Дата время назначения", ""), "%Y-%m-%d %H:%M:%S")
+                continue
+            try:
+                assigned_dt = datetime.strptime(r.get("Дата время назначения", ""), "%Y-%m-%d %H:%M:%S")
                 assigned_dt = timezone('Europe/Moscow').localize(assigned_dt)
                 elapsed_minutes = (moscow_now - assigned_dt).total_seconds() / 60
                 priority = r.get("Приоритет", "Средний").strip()
@@ -1742,7 +1747,8 @@ async def morning_digest(context: CallbackContext):
                 max_minutes = STALE_HIGH_PRIORITY_MINUTES if priority == "Высокий" else \
                               STALE_MEDIUM_PRIORITY_MINUTES if priority == "Средний" else \
                               STALE_LOW_PRIORITY_MINUTES
-                if elapsed_minutes > max_minutes(r)
+                if elapsed_minutes > max_minutes:
+                    stale.append(r)
             except:
                 continue
 
@@ -1766,7 +1772,7 @@ async def morning_digest(context: CallbackContext):
         else:
             lines = ["🌅 УТРЕННИЙ ДАЙДЖЕСТ (рабочий день)", ""]
             if urgent_unassigned:
-                lines.append(f"🚨 НЕРАСПРЕНЫЕ СРОЧНЫЕ ЗАДАЧИ ({len(urgent_unassigned)}):")
+                lines.append(f"🚨 НЕРАСПРЕДЕЛЁННЫЕ СРОЧНЫЕ ЗАДАЧИ ({len(urgent_unassigned)}):")
                 for task in urgent_unassigned:
                     lines.append(f"  • {task.get('ID', '—')} — {task.get('Тема задачи', '—')}")
                 lines.append("")
@@ -2034,7 +2040,8 @@ async def weekly_digest(app: Application):
             "low": priority_counts.get("Низкий", 0),
             "operational": len(operational_tasks),
             "overdue": len(weekly_tasks) - len(completed_on_time),
-            "stale": len(st "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
+            "stale": len(stale_tasks),
+            "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
             "on_time_percent": round(on_time_percent, 1),
             "note": "Еженедельный дайджест с визуализацией"
         }
