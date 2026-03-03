@@ -1673,10 +1673,11 @@ async def check_stale_in_progress(context: CallbackContext):
                 })
 
         if stale_tasks:
+            # Правильный отступ для начала списка 'lines'
             lines = [
                 "⏳ Задачи 'В РАБОТЕ' превысили допустимый лимит:",
                 ""
-            ]
+            ] # <-- Правильный отступ: соответствует 'lines = [...]' выше
             for task in stale_tasks:
                 lines.append(
                     f"{task['emoji']} {task['id']} — {task['topic']}\n"
@@ -1684,7 +1685,6 @@ async def check_stale_in_progress(context: CallbackContext):
                     f"   Приоритет: {task['priority']} (лимит: {task['max_minutes']}мин)\n"
                     f"   В работе: {task['elapsed_minutes']}мин (превышение: +{task['overdue_minutes']}мин)\n"
                 )
-
             lines.append("Рекомендуется уточнить статус у исполнителя")
             message = "\n".join(lines)
 
@@ -1702,6 +1702,7 @@ async def check_stale_in_progress(context: CallbackContext):
 
     except Exception as e:
         logger.error(f"Ошибка проверки зависших задач: {e}")
+
 
 async def morning_digest(context: CallbackContext):
     if is_quiet_hours():
