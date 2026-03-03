@@ -657,7 +657,20 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Не удалось отправить в личку: {e}")
         await update.message.reply_text("⚠️ Напишите боту в личку /start.")
-
+async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной запуск еженедельного дайджеста"""
+    user = update.effective_user
+    if not is_allowed_user(user.id):
+        await update.message.reply_text("❌ У вас нет прав для запуска этого отчёта.")
+        return
+    
+    await update.message.reply_text("⏳ Формирую еженедельный дайджест...")
+    try:
+        await weekly_digest(context.application)
+    except Exception as e:
+        logger.error(f"Ошибка при ручном запуске дайджеста: {e}")
+        await update.message.reply_text(f"❌ Ошибка при формировании отчёта: {str(e)}")
+        
 async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not context.args:
@@ -2007,6 +2020,7 @@ def main():
     application.add_handler(CommandHandler("limits", cmd_limits))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("oper", cmd_operational))
+    application.add_handler(CommandHandler("weekly", cmd_weekly))
     application.add_handler(MessageHandler(
         filters.REPLY & filters.Chat(RPZ_DISCUSSION_CHAT_ID),
         handle_task_reply
