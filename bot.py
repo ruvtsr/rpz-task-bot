@@ -434,7 +434,7 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
 
     # 2. Heatmap активности
     fig2, ax2 = plt.subplots(figsize=(12, 6))
-    tasks_df['created_time'] = pd.to_datetime(tasks_df['Время создания'], format='%H:%M:%S', errors='coerce').dt.hour
+    tasks_df['created_time'] = pd.to_datetime(tasks_df['Время'], format='%H:%M:%S', errors='coerce').dt.hour
     tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce')
     tasks_df['weekday'] = tasks_df['created_date'].dt.dayofweek
     heatmap_data = np.zeros((7, 24))
@@ -1452,7 +1452,7 @@ async def check_overdue_unassigned(context: CallbackContext):
             if status != "Не распределено":
                 continue
             created_date = str(record.get("Дата создания", "")).strip()
-            created_time = str(record.get("Время создания", "")).strip() or str(record.get("Время", "")).strip()
+            created_time = str(record.get("Время", "")).strip()
             try:
                 if created_time:
                     created_dt = datetime.strptime(f"{created_date} {created_time}", "%Y-%m-%d %H:%M:%S")
@@ -1615,7 +1615,7 @@ async def morning_digest(context: CallbackContext):
             if r.get("Статус", "").strip() != "Не распределено":
                 continue
             try:
-                created_dt_str = f"{r.get('Дата создания', '')} {r.get('Время создания', '')}".strip()
+                created_dt_str = f"{r.get('Дата создания', '')} {r.get('Время', '')}".strip()
                 created_dt = datetime.strptime(created_dt_str, "%Y-%m-%d %H:%M:%S")
                 created_dt = timezone('Europe/Moscow').localize(created_dt)
                 if created_dt < threshold_dt:
@@ -1751,7 +1751,7 @@ async def weekly_digest(app: Application):
             if task['Статус'] in ['В работе', 'Не распределено']:
                 try:
                     created_dt = datetime.strptime(
-                        f"{task['Дата создания']} {task.get('Время создания', task.get('Время', '00:00:00'))}",
+                        f"{task['Дата создания']} {task.get('Время', '00:00:00'))}",
                         "%Y-%m-%d %H:%M:%S"
                     )
                     created_dt = timezone('Europe/Moscow').localize(created_dt)
@@ -1933,7 +1933,7 @@ async def recover_urgent_tasks_on_startup(application: Application):
             if status != "Не распределено" or priority != "Высокий" or not task_id.startswith("TASK-"):
                 continue
             created_date = str(record.get("Дата создания", "")).strip()
-            created_time = str(record.get("Время создания", "")).strip() or str(record.get("Время", "")).strip()
+            created_time = str(record.get("Время", "")).strip()
             try:
                 if created_time:
                     created_dt_str = f"{created_date} {created_time}"
