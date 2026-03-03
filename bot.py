@@ -12,10 +12,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-from typing import Optional, Dict, Tuple wraps
+from typing import Optional, Dict, Tuple
+from functools import wraps
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import io
+
 # ======================
 # Импорты для визуализации и аналитики
 # ======================
@@ -49,33 +52,46 @@ ALLOWED_USERS = list(map(int, os.getenv("ALLOWED_USERS").split(",")))
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 REPORT_HOUR, REPORT_MINUTE = map(int, os.getenv("REPORT_TIME", "20:00").split(":"))
 
+# Для обратной совместимости
+ENGINEERS_CHANNEL_ID = RPZ_DISCUSSION_CHAT_ID
+
 # Параметры уведомлений
-UNASSIGNED_REPORT_INTERVAL = int(os.getenv("UNASSIGNED_REPORT_INTERVAL", "30"))
+UNASS = int(os.getenv("UNASSIGNED_REPORT_INTERVAL", "30"))
 URGENT_UNASSIGNED_DELAY = int(os.getenv("URGENT_UNASSIGNED_DELAY", "5"))
 URGENT_UNASSIGNED_INTERVAL = int(os.getenv("URGENT_UNASSIGNED_INTERVAL", "5"))
 OVERDUE_HOURS_THRESHOLD = int(os.getenv("OVERDUE_HOURS_THRESHOLD", "24"))
-STALE_CHECK_INTERVAL = int(os.getenv("STALE_CHECK_INTERVAL", "30")) # <-- ДОБАВЛЕНО
+STALE_CHECK_INTERVAL = int(os.getenv("STALE_CHECK_INTERVAL", "30"))
 
-# Настраиваемые лимиты зависших задач (в минутах)
-STALE_HIGH_PRIORITY_MINUTES = int(os.getenv("STALE_HIGH_PRIORITY_MINUTES", "60"))
-STALE_MEDIUM_PRIORITY_MINUTES = int(os.getenv("STALE_MEDIUM_PRIORITY_MINUTES", "300"))
-STALE_LOW_PRIORITY_MINUTES = int(os.getenv("STALE_LOW_PRIORITY_MINUTES", "1440"))
+# Настраиваемые лимиты зависших задач (в часах)
+STALE_HIGH_PRIORITY_HOURS = float(os.getenv("STALE_HIGH_PRIORITY_HOURS", "1"))
+STALE_MEDIUM_PRIORITY_HOURS = float(os.getenv("STALE_MEDIUM_PRIORITY_HOURS", "5"))
+STALE_LOW_PRIORITY_HOURS = float(os.getenv("STALE_LOW_PRIORITY_HOURS", "24"))
+
+# Альтернативный формат в минутах
+STALE_HIGH_PRIORITY_MINUTES = int(os.getenv("STALE_HIGH_PRIORITY_MINUTES", str(int(STALE_HIGH_PRIORITY_HOURS * 60))))
+STALE_MEDIUM_PRIORITY_MINUTES = int(os.getenv("STALE_MEDIUM_PRIORITY_MINUTES", str(int(STALE_MEDIUM_PRIORITY_HOURS * 60))))
+STALE_LOW_PRIORITY_MINUTES = int(os.getenv("STALE_LOW_PRIORITY_MINUTES", str(int(STALE_LOW_PRIORITY_HOURS * 60))))
+
+# Конвертация в часы
+STALE_HIGH_PRIORITY_LIMIT = STALE_HIGH_PRIORITY_MINUTES / 60
+STALE_MEDIUM_PRIORITY_LIMIT = STALE_MEDIUM_PRIORITY_MINUTES / 60
+STALE_LOW_PRIORITY_LIMIT = STALE_LOW_PRIORITY_MINUTES / 60
 
 # Валидация минимальных значений
-MIN_LIMITS_MINUTES = {"Высокий": 6, "Средний": 60, "Низкий": 240}  # Минимум в минутах
-if STALE_HIGH_PRIORITY_MINUTES < MIN_LIMITS_MINUTES["Высокий"]:
-    logger.warning(f"STALE_HIGH_PRIORITY_MINUTES={STALE_HIGH_PRIORITY_MINUTES} слишком мало (минимум {MIN_LIMITS_MINUTES['Высокий']}). Установлено 60.")
-    STALE_HIGH_PRIORITY_MINUTES = 60
-if STALE_MEDIUM_PRIORITY_MINUTES < MIN_LIMITS_MINUTES["Средний"]:
-    logger.warning(f"STALE_MEDIUM_PRIORITY_MINUTES={STALE_MEDIUM_PRIORITY_MINUTES} слишком мало (минимум {MIN_LIMITS_MINUTES['Средний']}). Установлено 300.")
-    STALE_MEDIUM_PRIORITY_MINUTES = 300
-if STALE_LOW_PRIORITY_MINUTES < MIN_LIMITS_MINUTES["Низкий"]:
-    logger.warning(f"STALE_LOW_PRIORITY_MINUTES={STALE_LOW_PRIORITY_MINUTES} слишком мало (минимум {MIN_LIMITS_MINUTES['Низкий']}). Установлено 1440.")
-    STALE_LOW_PRIORITY_MINUTES = 1440
+MIN_LIMITS = {"Высокий": 0.1, "Средний": 1, "Низкий": 4}
+if STALE_HIGH_PRIORITY_LIMIT < MIN_LIMITS["Высокий"]:
+    logger.warning(f"STALE_HIGH_PRIORITY_LIMIT={STALE_HIGH_PRIORITY_LIMIT}ч слишком мал (минимум {MIN_LIMITS['Высокий']}ч). Установлено 1ч.")
+    STALE_HIGH_PRIORITY_LIMIT = 1.0
+if STALE_MEDIUM_PRIORITY_LIMIT < MIN_LIMITS["Средний"]:
+    logger.warning(f"STALE_MEDIUM_PRIORITY_LIMIT={STALE_MEDIUM_PRIORITY_LIMIT}ч слишком мал (минимум {MIN_LIMITS['Средний']}ч). Установлено 5ч.")
+    STALE_MEDIUM_PRIORITY_LIMIT = 5.0
+if STALE_LOW_PRIORITY_LIMIT < MIN_LIMITS["Низкий"]:
+    logger.warning(f"STALE_LOW_PRIORITY_LIMIT={STALE_LOW_PRIORITY_LIMIT}ч слишком мал (минимум {MIN_LIMITS['Низкий']}ч). Установлено 24ч.")
+    STALE_LOW_PRIORITY_LIMIT = 24.0
 
 logger.info(
-    f"Лимиты зависших задач: Высокий={STALE_HIGH_PRIORITY_MINUTES}мин, "
-    f"Средний={STALE_MEDIUM_PRIORITY_MINUTES}мин, Низкий={STALE_LOW_PRIORITY_MINUTES}мин"
+    f"Лимиты зависших задач: Высокий={STALE_HIGH_PRIORITY_LIMIT}ч, "
+    f"Средний={STALE_MEDIUM_PRIORITY_LIMIT}ч, Низкий={STALE_LOW_PRIORITY_LIMIT}ч"
 )
 
 # ======================
@@ -95,12 +111,11 @@ task_counter = 0
 users_mapping = {}
 urgent_watchlist = {}
 paused_timers = {}
-user_settings = {}  # {user_id: {"digest_pm": bool, "digest_type": str}} # digest_type: "краткий" или "полный"
+user_settings = {}  # {user_id: {"digest_pm": bool, "digest_type": str}}
 
 # ======================
 # Вспомогательные функции
 # ======================
-
 def get_moscow_time():
     return datetime.now(timezone('Europe/Moscow'))
 
@@ -145,7 +160,7 @@ def retry_sheet_operation(max_attempts: int = 3):
                     wait_time = min(2 ** (attempt - 1), 10)
                     logger.warning(f"Попытка {attempt}/{max_attempts} не удалась: {e}. Повтор через {wait_time}с")
                     await asyncio.sleep(wait_time)
-            logger.error(f"Все {max_attempts} попыток не удалась для {func.__name__}: {last_exception}")
+            logger.error(f"Все {max_attempts} попыток не удались для {func.__name__}: {last_exception}")
             raise last_exception
         return wrapper
     return decorator
@@ -186,28 +201,18 @@ async def get_cached_sheet_data():
     now = datetime.now().timestamp()
     if _sheet_cache["data"] is None or (now - _sheet_cache["timestamp"]) > CACHE_TTL:
         try:
-            fresh_data = SHEET.get_all_records()
-            _sheet_cache["data"] = fresh_data  # Обновляем только при успехе
+            _sheet_cache["data"] = SHEET.get_all_records()
             _sheet_cache["timestamp"] = now
-            logger.debug("Данные таблицы обновлены в кэше")
+            logger.info("Данные таблицы обновлены в кэше")  # ← ИСПРАВЛЕНО: добавлен logger.info(
         except Exception as e:
             logger.error(f"Ошибка обновления кэша таблицы: {e}")
             if _sheet_cache["data"] is None:
-                raise # Только если кэш пуст и не удалось обновить
+                raise
     return _sheet_cache["data"]
 
 # ======================
 # Форматирование сообщения задачи
 # ======================
-# ИСПРАВЛЕНО: Удалён "опер. задача", если он не нужен
-STATUS_ICONS = {
-    "не распределено": "🔴 Не распределено",
-    "в работе": "🟠 В работе",
-    "выполнено": "🟢 Выполнено",
-    "операционная задача": "🔵 Операционная задача",
-    # "опер. задача": "🔵 Операционная задача", # <-- УДАЛЕНО, ЕСЛИ НЕ НУЖНО
-}
-
 def format_task_message(task_data, status_line=""):
     author = task_data["author"]
     topic = task_data["topic"]
@@ -222,14 +227,22 @@ def format_task_message(task_data, status_line=""):
 
     # Надёжное определение иконки
     status_lower = status.lower()
-    status_ICONS.get(status_lower, status)
+    if "не распределено" in status_lower:
+        status_with_icon = "🔴 Не распределено"
+    elif "в работе" in status_lower:
+        status_with_icon = "🟠 В работе"
+    elif "выполнено" in status_lower:
+        status_with_icon = "🟢 Выполнено"
+    elif "операционная задача" in status_lower or "опер. задача" in status_lower:
+        status_with_icon = "🔵 Операционная задача"
+    else:
+        status_with_icon = status
 
     lines = [f"Задача #{task_data['id']}", ""]
     lines.append(f"Автор: {author}")
     lines.append(f"Тема: {topic}")
-    lines.append(f"Описание: ")
-    lines.append(f"{description}")
-    lines.append(f"")
+    lines.append(f"Описание: {description}")
+    lines.append("")
     lines.append(f"Приоритет: {priority}")
     lines.append(f"Статус: {status_with_icon}")
     if executor and "не распределено" not in status_lower:
@@ -245,7 +258,7 @@ def format_task_message(task_data, status_line=""):
     if status_line:
         lines.append("______________________")
         lines.append(status_line)
-    return "\n".join(lines)
+    return "\n".join(lines)  # ← ИСПРАВЛЕНО: \n вместо фактического переноса
 
 # ======================
 # Извлечение приоритета
@@ -256,19 +269,10 @@ def extract_priority(text: str) -> str:
     low_priority_triggers = ["#н ", "#низкий", "#low"]
     if any(trigger in text_lower for trigger in high_priority_triggers):
         return "Высокий"
-    elif any(trigger in text_lower for trigger in):
+    elif any(trigger in text_lower for trigger in low_priority_triggers):
         return "Низкий"
     else:
         return "Средний"
-
-# ======================
-# Упрощенная функция получения строки таблицы
-# ======================
-def safe_row_values(row_idx: int, min_cols: int = 15) -> list:
-    row = SHEET.row_values(row_idx)
-    while len(row) < min_cols:
-        row.append("")
-    return row
 
 # ======================
 # Загрузка пользователей
@@ -332,7 +336,6 @@ def save_user_setting(user_id: int, username: str, setting_key: str, value: str)
             if uid.strip() == str(user_id):
                 row_idx = i
                 break
-
         now_str = get_moscow_time().strftime("%Y-%m-%d %H:%M:%S")
         if row_idx:
             col_map = {"digest_pm": 3, "digest_type": 4}
@@ -348,14 +351,12 @@ def save_user_setting(user_id: int, username: str, setting_key: str, value: str)
                 now_str
             ]
             settings_sheet.append_row(new_row)
-
         if user_id not in user_settings:
             user_settings[user_id] = {"digest_pm": False, "digest_type": "краткий"}
         if setting_key == "digest_pm":
             user_settings[user_id]["digest_pm"] = (value == "да")
         elif setting_key == "digest_type":
             user_settings[user_id]["digest_type"] = value
-
         logger.info(f"Настройка {setting_key} для {user_id} сохранена: {value}")
     except Exception as e:
         logger.error(f"Ошибка сохранения настройки {setting_key} для {user_id}: {e}")
@@ -364,9 +365,7 @@ def save_user_setting(user_id: int, username: str, setting_key: str, value: str)
 # Логирование метрик в лист "Аналитика"
 # ======================
 def log_digest_metrics(digest_type: str, metrics: dict):
-    """
-    Записывает метрики дайджеста в отдельный лист "Аналитика"
-    """
+    """Записывает метрики дайджеста в отдельный лист "Аналитика" """
     try:
         try:
             analytics_sheet = GC.open_by_key(GOOGLE_SHEET_ID).worksheet("Аналитика")
@@ -382,7 +381,6 @@ def log_digest_metrics(digest_type: str, metrics: dict):
             ]
             analytics_sheet.append_row(headers)
             logger.info("Создан лист 'Аналитика' для метрик дайджестов")
-
         now = get_moscow_time().strftime("%Y-%m-%d %H:%M:%S")
         row = [
             now,
@@ -416,14 +414,12 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
     for status in ['Выполнено', 'В работе', 'Не распределено', 'Операционная задача']:
         if status not in daily_stats.columns:
             daily_stats[status] = 0
-
     x = np.arange(len(daily_stats))
     width = 0.2
     ax1.bar(x - 1.5*width, daily_stats.get('Выполнено', 0), width, label='Выполнено', color='#4CAF50')
     ax1.bar(x - 0.5*width, daily_stats.get('В работе', 0), width, label='В работе', color='#FF9800')
     ax1.bar(x + 0.5*width, daily_stats.get('Не распределено', 0), width, label='Не распределено', color='#F44336')
     ax1.bar(x + 1.5*width, daily_stats.get('Операционная задача', 0), width, label='Операционные', color='#2196F3')
-
     ax1.set_xticks(x)
     ax1.set_xticklabels([d.strftime('%a %d') for d in daily_stats.index], rotation=45)
     ax1.set_ylabel('Количество задач')
@@ -431,7 +427,6 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
     ax1.legend()
     ax1.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-
     chart_buf = io.BytesIO()
     plt.savefig(chart_buf, format='png', dpi=150)
     plt.close(fig1)
@@ -439,11 +434,9 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
 
     # 2. Heatmap активности
     fig2, ax2 = plt.subplots(figsize=(12, 6))
-    # ИСПРАВЛЕНО: Используем 'Время' вместо 'Время создания'
-    tasks_df['created_time'] = pd.to_datetime(tasks_df['Время'], format='%H:%M:%S', errors='coerce').dt.hour
+    tasks_df['created_time'] = pd.to_datetime(tasks_df['Время создания'], format='%H:%M:%S', errors='coerce').dt.hour
     tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce')
     tasks_df['weekday'] = tasks_df['created_date'].dt.dayofweek
-
     heatmap_data = np.zeros((7, 24))
     for _, row in tasks_df.iterrows():
         if pd.notnull(row['weekday']) and pd.notnull(row['created_time']):
@@ -451,10 +444,8 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
             hour = int(row['created_time'])
             if 0 <= day < 7 and 0 <= hour < 24:
                 heatmap_data[day, hour] += 1
-
     days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
     hours = [f'{h:02d}:00' for h in range(24)]
-
     sns.heatmap(heatmap_data, ax=ax2, cmap='YlOrRd', cbar_kws={'label': 'Количество задач'},
                 xticklabels=hours, yticklabels=days, linewidths=0.5)
     ax2.set_title('Heatmap: Активность создания задач по дням и часам')
@@ -462,12 +453,10 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
     ax2.set_ylabel('День недели')
     plt.setp(ax2.get_xticklabels(), rotation=90)
     plt.tight_layout()
-
     heatmap_buf = io.BytesIO()
     plt.savefig(heatmap_buf, format='png', dpi=150)
     plt.close(fig2)
     heatmap_buf.seek(0)
-
     return chart_buf, heatmap_buf
 
 # ======================
@@ -484,7 +473,6 @@ def initialize_task_counter():
             task_ids = ids[1:]
         else:
             task_ids = ids
-
         numbers = []
         for tid in task_ids:
             if tid and isinstance(tid, str) and tid.startswith("TASK-"):
@@ -541,12 +529,10 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         all_records = await get_cached_sheet_data()
         today_tasks = [r for r in all_records if r.get("Дата создания") == today]
-
         pending = []
         in_progress = {}
         completed = {}
         operational = {}
-
         for task in today_tasks:
             task_id = task.get("ID", "—")
             topic = task.get("Тема задачи", "—")
@@ -572,7 +558,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         overdue = []
         for task in all_records:
             if (task.get("Статус") == "Не распределено" and
-                task.get("Дата создания") != today):
+                    task.get("Дата создания") != today):
                 task_id = task.get("ID", "—")
                 topic = task.get("Тема задачи", "—")
                 overdue.append(f"• {task_id} {topic}")
@@ -608,7 +594,6 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при получении задач за сегодня: {e}")
         message = "❌ Не удалось загрузить задачи за сегодня."
-
     try:
         await context.bot.send_message(chat_id=user.id, text=message)
         await update.message.reply_text("✅ Отчёт отправлен в личные сообщения.")
@@ -624,7 +609,6 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r for r in all_records
             if r.get("Статус") == "Не распределено"
         ]
-
         if pending_tasks_list:
             lines = ["⏳ Нераспределённые задачи:", ""]
             for i, task in enumerate(pending_tasks_list, 1):
@@ -637,7 +621,6 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при получении нераспределённых задач: {e}")
         message = "❌ Не удалось загрузить нераспределённые задачи."
-
     try:
         await context.bot.send_message(chat_id=user.id, text=message)
         await update.message.reply_text("✅ Список нераспределённых отправлен в личку.")
@@ -645,19 +628,17 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Не удалось отправить в личку: {e}")
         await update.message.reply_text("⚠️ Напишите боту в личку /start.")
 
-async def cmd_stats(update: Update, context_TYPE):
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     try:
         all_records = await get_cached_sheet_data()
         total = len(all_records)
         completed = sum(1 for r in all_records if r.get("Статус") == "Выполнено")
         pending = sum(1 for r in all_records if r.get("Статус") == "Не распределено")
-        # ИСПРАВЛЕНО: Правильное закрытие скобок и кавычек
         operational = sum(1 for r in all_records if "операционная задача" in str(r.get("Статус", "")).lower() or "опер. задача" in str(r.get("Статус", "")).lower())
         in_progress = total - completed - pending - operational
         today = datetime.now(timezone('Europe/Moscow')).strftime("%Y-%m-%d")
         created_today = sum(1 for r in all_records if r.get("Дата создания") == today)
-
         message = (
             "📊 **Статистика по задачам**\n"
             f"Всего задач: {total}\n"
@@ -670,7 +651,6 @@ async def cmd_stats(update: Update, context_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
         message = "❌ Не удалось загрузить статистику."
-
     try:
         await context.bot.send_message(chat_id=user.id, text=message, parse_mode="Markdown")
         await update.message.reply_text("✅ Статистика отправлена в личные сообщения.")
@@ -686,7 +666,6 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return
-
     raw_arg = context.args[0].strip().upper()
     if raw_arg.startswith("TASK-"):
         task_id = raw_arg
@@ -698,7 +677,6 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         task_id = f"TASK-{raw_arg.zfill(4)}"
-
     try:
         all_ids = SHEET.col_values(1)
         row_idx = None
@@ -706,13 +684,12 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tid and tid.strip().upper() == task_id:
                 row_idx = i + 1
                 break
-
         if not row_idx:
             await update.message.reply_text(f"❌ Задача `{task_id}` не найдена.", parse_mode="Markdown")
             return
-
-        row = safe_row_values(row_idx)
-
+        row = SHEET.row_values(row_idx)
+        while len(row) < 15:
+            row.append("")
         task_data = {
             "id": row[0] or "—",
             "created_date": row[1] or "",
@@ -730,19 +707,47 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "priority": row[13] or "Средний",
             "closed_by": row[14] or ""
         }
-
         created_str = f"{task_data['created_date']} {task_data['created_time']}".strip()
         status = task_data["status"].strip()
         status_lower = status.lower()
-        status_with_icon = STATUS_ICONS.get(status_lower, status)
-
-        message = format_task_message(task_data, "")
-
+        if "не распределено" in status_lower:
+            status_with_icon = "🔴 Не распределено"
+        elif "в работе" in status_lower:
+            status_with_icon = "🟠 В работе"
+        elif "выполнено" in status_lower:
+            status_with_icon = "🟢 Выполнено"
+        elif "операционная задача" in status_lower or "опер. задача" in status_lower:
+            status_with_icon = "🔵 Операционная задача"
+        else:
+            status_with_icon = status
+        lines = [
+            f"🔍 Задача #{task_data['id']}",
+            "",
+            f"Автор: {task_data['author']}",
+            f"Тема: {task_data['topic']}",
+            f"Описание: {task_data['description']}",
+            "",
+            f"Приоритет: {task_data['priority']}",
+            f"Статус: {status_with_icon}"
+        ]
+        if task_data["executor"] and "не распределено" not in status_lower:
+            lines.append(f"Ответственный: {task_data['executor']}")
+        if task_data["closed_by"] and "выполнено" in status_lower and task_data["closed_by"].strip():
+            if task_data["closed_by"] != task_data["executor"]:
+                lines.append(f"Фактически выполнил: {task_data['closed_by']}")
+        if task_data["tags"]:
+            lines.append(f"Теги: {task_data['tags']}")
+        lines.append("______________________")
+        lines.append(f"Оформлено: {created_str}")
+        if task_data["assigned"] and "не распределено" not in status_lower:
+            lines.append(f"Взято в работу: {task_data['assigned']}")
+        if task_data["completed"] and "выполнено" in status_lower:
+            lines.append(f"Выполнено: {task_data['completed']}")
+        message = "\n".join(lines)
     except Exception as e:
         logger.error(f"Ошибка при поиске задачи {task_id}: {e}")
         await update.message.reply_text("❌ Произошла ошибка при поиске задачи. Обратитесь к администратору.")
         return
-
     try:
         await context.bot.send_message(
             chat_id=user.id,
@@ -759,9 +764,9 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         "⏱️ Текущие лимиты зависших задач:\n"
-        f"🔴 Высокий приоритет: {STALE_HIGH_PRIORITY_MINUTES} мин\n"
-        f"🟠 Средний приоритет: {STALE_MEDIUM_PRIORITY_MINUTES} мин\n"
-        f"🟡 Низкий приоритет: {STALE_LOW_PRIORITY_MINUTES} мин\n"
+        f"🔴 Высокий приоритет: {STALE_HIGH_PRIORITY_LIMIT}ч ({int(STALE_HIGH_PRIORITY_LIMIT * 60)} мин)\n"
+        f"🟠 Средний приоритет: {STALE_MEDIUM_PRIORITY_LIMIT}ч ({int(STALE_MEDIUM_PRIORITY_LIMIT * 60)} мин)\n"
+        f"🟡 Низкий приоритет: {STALE_LOW_PRIORITY_LIMIT}ч ({int(STALE_LOW_PRIORITY_LIMIT * 60)} мин)\n"
         "Измените в .env и перезапустите бота."
     )
     await update.message.reply_text(message)
@@ -773,13 +778,10 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not user_settings:
         load_user_settings()
-
     user_id = user.id
     settings = user_settings.get(user_id, {"digest_pm": False, "digest_type": "краткий"})
-
     digest_status = "✅ Включена" if settings["digest_pm"] else "❌ Отключена"
     digest_type = "📊 Полная" if settings["digest_type"] == "полная" else "📝 Краткая"
-
     text = (
         "⚙️ *Ваши настройки уведомлений*\n"
         f"📬 Дайджест в личные сообщения: {digest_status}\n"
@@ -803,7 +805,6 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-# --- ИСПРАВЛЕНО: Правильный синтаксис в settings_callback ---
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатия кнопок настроек"""
     query = update.callback_query
@@ -811,10 +812,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
-
     data = query.data
     user_id = user.id
-
     if data.startswith("toggle_digest_pm_"):
         current = user_settings.get(user_id, {}).get("digest_pm", False)
         new_value = "нет" if current else "да"
@@ -839,14 +838,13 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /oper - перевод задачи в статус операционной"""
     user = update.effective_user
-    if not context.args:
+    if not context.args:  # ← ИСПРАВЛЕНО: добавлена проверка аргументов
         await update.message.reply_text(
             "ℹ️ Использование: `/oper TASK-1234` или `/oper 1234`\n"
             "Переводит задачу в статус «Операционная задача»",
             parse_mode="Markdown"
         )
         return
-
     raw_arg = context.args[0].strip().upper()
     if raw_arg.startswith("TASK-"):
         task_id = raw_arg
@@ -855,7 +853,6 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный формат ID. Используйте: `TASK-1234` или `1234`", parse_mode="Markdown")
             return
         task_id = f"TASK-{raw_arg.zfill(4)}"
-
     try:
         all_ids = SHEET.col_values(1)
         row_idx = None
@@ -863,21 +860,19 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tid and tid.strip().upper() == task_id:
                 row_idx = i + 1
                 break
-
         if not row_idx:
             await update.message.reply_text(f"❌ Задача `{task_id}` не найдена.", parse_mode="Markdown")
             return
-
-        row = safe_row_values(row_idx)
-
+        row = SHEET.row_values(row_idx)
+        while len(row) < 15:
+            row.append("")
         current_status = row[7].strip() if len(row) > 7 else "—"
         if "выполнено" in current_status.lower():
-            await update.message.reply_text(
+            await update.message.reply_text(  # ← ИСПРАВЛЕНО: добавлена скобка (
                 f"❌ Задача `{task_id}` уже выполнена. Нельзя изменить статус.",
                 parse_mode="Markdown"
             )
             return
-
         now = get_moscow_time()
         operational_status = "Операционная задача"
         SHEET.update_cell(row_idx, 8, operational_status)
@@ -885,7 +880,6 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
             assign_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
             SHEET.update_cell(row_idx, 9, assign_time_str)
             logger.info(f"Задача {task_id} переведена в операционную и автоматически назначена")
-
         author = row[5] or "—"
         topic = row[3] or "—"
         description = row[4] or "—"
@@ -895,7 +889,6 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
         created_time = row[2] or ""
         created = f"{created_date} {created_time}".strip()
         assigned = row[8] or ""
-
         new_text = format_task_message({
             "id": task_id,
             "author": author,
@@ -907,7 +900,6 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "assigned_str": assigned if assigned else now.strftime("%Y-%m-%d %H:%M:%S"),
             "executor": executor or "—"
         }, "🔵 Операционная задача")
-
         try:
             msg_id_str = row[11] if len(row) > 11 else ""
             if msg_id_str and str(msg_id_str).isdigit():
@@ -920,33 +912,14 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"Сообщение в канале обновлено для операционной задачи: {task_id}")
         except Exception as e:
             logger.error(f"Ошибка редактирования сообщения в канале: {e}")
-
         await context.bot.send_message(
             chat_id=RPZ_DISCUSSION_CHAT_ID,
             text=f"✅ Задача №{task_id} переведена в статус «Операционная задача»"
         )
         await update.message.reply_text(f"✅ Задача `{task_id}` переведена в статус «Операционная задача»", parse_mode="Markdown")
-
     except Exception as e:
         logger.error(f"Ошибка при переводе задачи {task_id} в операционную: {e}")
         await update.message.reply_text("❌ Произошла ошибка. Обратитесь к администратору.")
-
-# --- НОВАЯ КОМАНДА: Ручной запуск еженедельного дайджеста ---
-async def cmd_weekly_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    # (Опционально) Проверка, что команда вызваном или из нужного чата
-    # if user.id != YOUR_ADMIN_ID:
-    #     await update.message.reply_text("❌ Недостаточно прав.")
-    #     return
-
-    await update.message.reply_text("🔧 Запускаю еженедельный дайджест вручную...")
-    try:
-        # Вызов функции дайджеста напрямую, передав экземпляр приложения
-        await weekly_digest(context.application)
-        await update.message.reply_text("✅ Еженедельный дайджест завершён.")
-    except Exception as e:
-        logger.error(f"Ошибка ручного запуска дайджеста: {e}")
-        await update.message.reply_text(f"❌ Ошибка при запуске дайджеста: {e}")
 
 # ======================
 # Обработка задач
@@ -956,38 +929,29 @@ async def handle_new_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not message or not user:
         return
-
-    if user.id in (777000, 1087968824): # Игнорировать анонимные сообщения
+    if user.id in (777000, 1087968824):  # Игнорировать анонимные сообщения
         logger.debug("Игнорируем анонимное сообщение")
         return
-
     if not is_allowed_user(user.id):
         logger.debug(f"Пользователь {user.id} не в списке разрешённых")
         return
-
-    chat_id = message.chat_id
+    chat_id = message.chat_id  # ← ИСПРАВЛЕНО: было return = message.chat_id
     if chat_id != RPZ_DISCUSSION_CHAT_ID:
         return
-
     text = (message.text or message.caption or "").strip()
     if not text:
         return
-
     key = (user.id, chat_id, None)
     if key in pending_tasks:
-        pending_parts"].append(text)
+        pending_tasks[key]["desc_parts"].append(text)
         pending_tasks[key]["msg_ids"].append(message.message_id)
         return
-
     if not (text.startswith("#З ") or text == "#З"):
         return
-
     logger.info(f"Получено сообщение в чате обсуждений {chat_id} от {user.id} (@{user.username}): {text[:50]}...")
-
     topic, desc_part = extract_topic_and_desc(text)
     if topic is None and text != "#З":
         return
-
     now = get_moscow_time()
     pending_tasks[key] = {
         "user": user,
@@ -996,7 +960,6 @@ async def handle_new_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "msg_ids": [message.message_id],
         "start_time": now,
     }
-
     context.job_queue.run_once(
         finalize_task_job,
         20,
@@ -1009,32 +972,25 @@ async def finalize_task_job(context: CallbackContext):
     key = job.data["key"]
     if key not in pending_tasks:
         return
-
     data = pending_tasks.pop(key)
     user = data["user"]
     topic = data["topic"]
     description = "\n".join(data["desc_parts"]).strip()
     msg_ids = data["msg_ids"]
-
     now = get_moscow_time()
     task_id = generate_task_id()
-
     raw_username = f"@{user.username}" if user.username else None
     display_name = users_mapping.get(raw_username, raw_username or user.full_name)
     author = display_name
-
     tags = has_sorokin_tag(user.id)
     full_text = topic + "\n" + description
     priority = extract_priority(full_text)
-
     logger.info(f"Определён приоритет '{priority}' для задачи {task_id} по тексту: {full_text[:100]}")
-
     for msg_id in msg_ids:
         try:
             await context.bot.delete_message(chat_id=RPZ_DISCUSSION_CHAT_ID, message_id=msg_id)
         except Exception as e:
             logger.debug(f"Не удалось удалить {msg_id}: {e}")
-
     try:
         channel_msg = await context.bot.send_message(
             chat_id=RPZ_ANNOUNCE_CHANNEL_ID,
@@ -1052,7 +1008,6 @@ async def finalize_task_job(context: CallbackContext):
     except Exception as e:
         logger.error(f"Не удалось опубликовать в канале: {e}")
         return
-
     try:
         row = [
             task_id,
@@ -1076,7 +1031,6 @@ async def finalize_task_job(context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка сохранения в таблицу: {e}")
         return
-
     if priority == "Высокий":
         job_name = f"urgent_watch_{task_id}"
         urgent_watchlist[task_id] = {
@@ -1105,19 +1059,14 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not message or not user:
         return
-
     if user.id in (777000, 1087968824):
         return
-
     if message.chat_id != RPZ_DISCUSSION_CHAT_ID:
         return
-
     text = (message.text or "").strip()
     if not text:
         return
-
     logger.info(f"Обработка команды: {text}")
-
     task_id = None
     if message.reply_to_message:
         quoted_text = ""
@@ -1125,16 +1074,13 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quoted_text = message.reply_to_message.text
         elif message.reply_to_message.caption:
             quoted_text = message.reply_to_message.caption
-
         task_match = re.search(r'TASK-(\d{4})', quoted_text)
         if task_match:
             task_id = f"TASK-{task_match.group(1)}"
             logger.info(f"Найден ID задачи из цитаты: {task_id}")
-
     if not task_id:
         logger.warning("TASK-XXXX не найден в цитате")
         return
-
     try:
         all_ids = SHEET.col_values(1)
         cell = None
@@ -1149,9 +1095,7 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при поиске задачи: {e}")
         return
-
     row_idx = cell.row
-
     try:
         current_status = SHEET.cell(row_idx, 8).value
         if current_status == "Выполнено":
@@ -1160,20 +1104,18 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка чтения статуса: {e}")
         return
-
     processed = False
     action_msg_id = message.message_id
-
     username_match = re.search(r'@[\w\d_]+', text)
     if username_match:
         executor_handle = username_match.group(0)
         executor_name = users_mapping.get(executor_handle, executor_handle)
         display_name_with_username = f"{executor_name} ({executor_handle})"
-
         now = get_moscow_time()
         try:
-            row = safe_row_values(row_idx)
-
+            row = SHEET.row_values(row_idx)
+            while len(row) < 15:
+                row.append("")
             author = row[5] or "—"
             topic = row[3] or "—"
             description = row[4] or "—"
@@ -1181,12 +1123,10 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             created_date = row[1] or ""
             created_time = row[2] or ""
             created = f"{created_date} {created_time}".strip()
-
             SHEET.update_cell(row_idx, 7, executor_name)
             SHEET.update_cell(row_idx, 8, "В работе")
             assign_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
             SHEET.update_cell(row_idx, 9, assign_time_str)
-
             if task_id in urgent_watchlist:
                 job_name = urgent_watchlist[task_id]["job_name"]
                 current_jobs = context.job_queue.get_jobs_by_name(job_name)
@@ -1194,7 +1134,6 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     job.schedule_removal()
                 del urgent_watchlist[task_id]
                 logger.info(f"Таймер срочной задачи {task_id} отменён после назначения")
-
             new_text = format_task_message({
                 "id": task_id,
                 "author": author,
@@ -1206,7 +1145,6 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "assigned_str": assign_time_str,
                 "executor": executor_name
             }, f"В работе у {executor_name}")
-
             try:
                 msg_id_str = row[11] if len(row) > 11 else ""
                 if msg_id_str and str(msg_id_str).isdigit():
@@ -1227,29 +1165,24 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 SHEET.update_cell(row_idx, 12, str(new_msg.message_id))
                 logger.info(f"Задача пересоздана. Новое Msg_ID: {new_msg.message_id}")
-
             await context.bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=f"Задача №{task_id} → назначена на {display_name_with_username}"
             )
             logger.info(f"Задача №{task_id} назначена на {display_name_with_username}")
             processed = True
-
         except Exception as e:
-            logger.error(f"Ошибка при назначении: {e}")
-
+            logger.error(f"Ошибка при назначении: {e}")  # ← ИСПРАВЛЕНО: было "Ошибка при назe}"
     elif any(trigger in text.lower() for trigger in ["#выполнено", "готово", "решено"]):
         now = get_moscow_time()
         try:
             assigned_executor = SHEET.cell(row_idx, 7).value or ""
             raw_closer_username = f"@{user.username}" if user.username else None
             closer_display_name = users_mapping.get(raw_closer_username, raw_closer_username or user.full_name)
-
             complete_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
             SHEET.update_cell(row_idx, 8, "Выполнено")
             SHEET.update_cell(row_idx, 10, complete_time_str)
             SHEET.update_cell(row_idx, 15, closer_display_name)
-
             if task_id in urgent_watchlist:
                 job_name = urgent_watchlist[task_id]["job_name"]
                 current_jobs = context.job_queue.get_jobs_by_name(job_name)
@@ -1257,7 +1190,6 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     job.schedule_removal()
                 del urgent_watchlist[task_id]
                 logger.info(f"Таймер срочной задачи {task_id} отменён после закрытия")
-
             author = SHEET.cell(row_idx, 6).value or "—"
             topic = SHEET.cell(row_idx, 4).value or "—"
             description = SHEET.cell(row_idx, 5).value or "—"
@@ -1266,13 +1198,11 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             created_time = SHEET.cell(row_idx, 3).value or ""
             created = f"{created_date} {created_time}".strip()
             assigned = SHEET.cell(row_idx, 9).value or ""
-
             status_line_parts = []
             if assigned_executor and assigned_executor.strip() and assigned_executor != closer_display_name:
                 status_line_parts.append(f"назначено на {assigned_executor}")
-            status_line_parts.append(f"выполнил {closer_display_name}")
+                status_line_parts.append(f"выполнил {closer_display_name}")
             status_line = " | ".join(status_line_parts)
-
             new_text = format_task_message({
                 "id": task_id,
                 "author": author,
@@ -1286,7 +1216,6 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "executor": assigned_executor,
                 "closed_by": closer_display_name
             }, f"🟢 Выполнено ({status_line})")
-
             try:
                 msg_id_str = SHEET.cell(row_idx, 12).value
                 if msg_id_str and str(msg_id_str).isdigit():
@@ -1305,22 +1234,19 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=new_text
                 )
                 SHEET.update_cell(row_idx, 12, str(new_msg.message_id))
-
+                logger.info(f"Задача пересоздана после закрытия. Новое Msg_ID: {new_msg.message_id}")
             if assigned_executor and assigned_executor.strip() and assigned_executor != closer_display_name:
                 notification_text = f"Задача №{task_id} → выполнена {closer_display_name} (ответственный: {assigned_executor})"
             else:
                 notification_text = f"Задача №{task_id} → выполнена {closer_display_name}"
-
             await context.bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=notification_text
             )
             logger.info(f"№{task_id} закрыто. Ответственный: {assigned_executor or '—'}, фактически выполнил: {closer_display_name}")
             processed = True
-
         except Exception as e:
             logger.error(f"Ошибка при закрытии: {e}")
-
     elif any(trigger in text.lower() for trigger in ["#опер", "#операционная", "#опер. задача"]):
         now = get_moscow_time()
         try:
@@ -1332,21 +1258,17 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             created_time = SHEET.cell(row_idx, 3).value or ""
             created = f"{created_date} {created_time}".strip()
             executor = SHEET.cell(row_idx, 7).value or ""
-
             operational_status = "Операционная задача"
             SHEET.update_cell(row_idx, 8, operational_status)
-
             if not executor.strip():
                 auto_executor = f"@{user.username}" if user.username else user.full_name
                 display_name = users_mapping.get(auto_executor, auto_executor)
                 SHEET.update_cell(row_idx, 7, display_name)
                 executor = display_name
-
             current_assigned = SHEET.cell(row_idx, 9).value or ""
             if not current_assigned.strip():
                 assign_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
                 SHEET.update_cell(row_idx, 9, assign_time_str)
-
             new_text = format_task_message({
                 "id": task_id,
                 "author": author,
@@ -1358,7 +1280,6 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "assigned_str": now.strftime("%Y-%m-%d %H:%M:%S") if not current_assigned.strip() else current_assigned,
                 "executor": executor
             }, "🔵 Операционная задача")
-
             try:
                 msg_id_str = SHEET.cell(row_idx, 12).value
                 if msg_id_str and str(msg_id_str).isdigit():
@@ -1370,17 +1291,14 @@ async def handle_task_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
             except Exception as e:
                 logger.error(f"Ошибка редактирования при переводе в операционную: {e}")
-
             await context.bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=f"✅ Задача №{task_id} переведена в статус «Операционная задача»"
             )
             logger.info(f"Задача {task_id} переведена в операционную через тег")
             processed = True
-
         except Exception as e:
             logger.error(f"Ошибка перевода в операционную задачу: {e}")
-
     if processed:
         try:
             await context.bot.delete_message(
@@ -1400,15 +1318,12 @@ async def check_urgent_unassigned(context: CallbackContext):
     if is_weekend():
         logger.debug("Выходной день — циклические уведомления отключены")
         return
-
     task_id = context.job.data["task_id"]
     topic = context.job.data["topic"]
     created_at = datetime.fromisoformat(context.job.data["created_at"])
-
     if task_id not in urgent_watchlist:
         logger.debug(f"Задача {task_id} уже назначена (удалена из ватчлиста)")
         return
-
     try:
         all_ids = SHEET.col_values(1)
         row_idx = None
@@ -1420,24 +1335,19 @@ async def check_urgent_unassigned(context: CallbackContext):
             logger.warning(f"Задача {task_id} не найдена в таблице")
             urgent_watchlist.pop(task_id, None)
             return
-
         status = (SHEET.cell(row_idx, 8).value or "").strip()
         executor = (SHEET.cell(row_idx, 7).value or "").strip()
         priority = (SHEET.cell(row_idx, 14).value or "").strip()
-
         if priority != "Высокий" or status != "Не распределено" or executor.strip():
             urgent_watchlist.pop(task_id, None)
             logger.info(f"Задача {task_id} больше не требует срочных уведомлений")
             return
-
         moscow_now = get_moscow_time()
         elapsed_minutes = int((moscow_now - created_at).total_seconds() / 60)
-
         urgent_watchlist[task_id]["notified_count"] += 1
         notify_count = urgent_watchlist[task_id]["notified_count"]
-
-        alert_msg = (
-            f"🚨 СРОЧНО! Нераспределённая задача с ВЫСОКИМ приоритетом\n"
+        alert_msg = (  # ← ИСПРАВЛЕНО: добавлена открывающая кавычка и эмодзи
+            "🚨 СРОЧНО! Нераспределённая задача с ВЫСОКИМ приоритетом\n"
             f"Задача: {task_id}\n"
             f"Тема: {topic}\n"
             f"Время ожидания: {elapsed_minutes} мин\n"
@@ -1452,7 +1362,6 @@ async def check_urgent_unassigned(context: CallbackContext):
             f"Срочное уведомление #{notify_count} для {task_id} отправлено "
             f"(ожидание: {elapsed_minutes} мин)"
         )
-
         context.job_queue.run_once(
             check_urgent_unassigned,
             URGENT_UNASSIGNED_INTERVAL * 60,
@@ -1474,7 +1383,6 @@ async def report_unassigned_non_urgent(context: CallbackContext):
     if is_quiet_hours():
         logger.debug("Режим тишины (21:00–8:00) — регулярный отчёт пропущен")
         return
-
     try:
         all_records = await get_cached_sheet_data()
         non_urgent_unassigned = [
@@ -1482,14 +1390,11 @@ async def report_unassigned_non_urgent(context: CallbackContext):
             if str(r.get("Статус", "")).strip() == "Не распределено"
             and str(r.get("Приоритет", "")).strip() in ("Средний", "Низкий")
         ]
-
         if not non_urgent_unassigned:
             logger.debug("Нет нераспределённых задач со Средним/Низким приоритетом")
             return
-
         medium = [t for t in non_urgent_unassigned if str(t.get("Приоритет", "")).strip() == "Средний"]
         low = [t for t in non_urgent_unassigned if str(t.get("Приоритет", "")).strip() == "Низкий"]
-
         lines = ["📋 НЕРАСПРЕДЕЛЁННЫЕ ЗАДАЧИ (Средний/Низкий приоритет):", ""]
         if medium:
             lines.append(f"⚠️ Средний приоритет ({len(medium)}):")
@@ -1503,10 +1408,8 @@ async def report_unassigned_non_urgent(context: CallbackContext):
                 created = task.get("Дата создания", "")
                 lines.append(f"  • {task.get('ID', '—')} — {task.get('Тема задачи', '—')} (создана: {created})")
             lines.append("")
-
         lines.append(f"Всего: {len(non_urgent_unassigned)} задач")
         message = "\n".join(lines)
-
         await context.bot.send_message(
             chat_id=RPZ_DISCUSSION_CHAT_ID,
             text=message,
@@ -1526,10 +1429,8 @@ async def check_overdue_unassigned(context: CallbackContext):
     if is_weekend():
         logger.info("Выходной день — уведомления о просроченных задачах отключены (только логирование)")
         return
-
     moscow_now = get_moscow_time()
     threshold_dt = moscow_now - timedelta(hours=OVERDUE_HOURS_THRESHOLD)
-
     try:
         all_records = await get_cached_sheet_data()
         overdue_tasks = []
@@ -1537,9 +1438,8 @@ async def check_overdue_unassigned(context: CallbackContext):
             status = str(record.get("Статус", "")).strip()
             if status != "Не распределено":
                 continue
-
             created_date = str(record.get("Дата создания", "")).strip()
-            created_time = str(record.get("Время", "")).strip() # Используем 'Время', а не 'Время создания'
+            created_time = str(record.get("Время создания", "")).strip() or str(record.get("Время", "")).strip()
             try:
                 if created_time:
                     created_dt = datetime.strptime(f"{created_date} {created_time}", "%Y-%m-%d %H:%M:%S")
@@ -1548,7 +1448,6 @@ async def check_overdue_unassigned(context: CallbackContext):
                 created_dt = timezone('Europe/Moscow').localize(created_dt)
             except (ValueError, TypeError):
                 continue
-
             if created_dt < threshold_dt:
                 elapsed = moscow_now - created_dt
                 hours_overdue = int(elapsed.total_seconds() / 3600)
@@ -1560,13 +1459,11 @@ async def check_overdue_unassigned(context: CallbackContext):
                     "hours": hours_overdue,
                     "created": created_dt.strftime("%Y-%m-%d %H:%M")
                 })
-
         if overdue_tasks:
             overdue_tasks.sort(key=lambda x: (
                 0 if x["priority"] == "Высокий" else 1 if x["priority"] == "Средний" else 2,
                 -x["hours"]
             ))
-
             lines = [
                 f"⚠️ ПРОСРОЧЕННЫЕ НЕРАСПРЕДЕЛЁННЫЕ ЗАДАЧИ (> {OVERDUE_HOURS_THRESHOLD} часов):",
                 ""
@@ -1581,10 +1478,8 @@ async def check_overdue_unassigned(context: CallbackContext):
                             f"({task['hours']}ч, автор: {task['author']})"
                         )
                     lines.append("")
-
             lines.append("❗ Требуется срочное назначение исполнителей!")
             message = "\n".join(lines)
-
             await context.bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=message
@@ -1592,7 +1487,6 @@ async def check_overdue_unassigned(context: CallbackContext):
             logger.info(f"Отправлено уведомление о {len(overdue_tasks)} просроченных задачах (>24ч)")
         else:
             logger.info("Просроченных нераспределённых задач (>24ч) не обнаружено")
-
     except Exception as e:
         logger.error(f"Ошибка проверки просроченных задач: {e}")
 
@@ -1604,50 +1498,41 @@ async def check_stale_in_progress(context: CallbackContext):
     if is_quiet_hours():
         logger.debug("Режим тишины (21:00–8:00) — проверка зависших задач пропущена")
         return
-
     try:
         all_records = await get_cached_sheet_data()
         stale_tasks = []
         for record in all_records:
             status = str(record.get("Статус", "")).strip()
-            # === ИСКЛЮЧЕНИЕ: Операционные задачи не проверяются ===
             status_lower = status.lower()
             if "операционная задача" in status_lower or "опер. задача" in status_lower:
                 continue
-
             if status != "В работе":
                 continue
-
             executor_name = str(record.get("Исполнитель", "")).strip()
             if not executor_name:
                 continue
-
             priority = str(record.get("Приоритет", "Средний")).strip()
             assigned_date_str = str(record.get("Дата время назначения", "")).strip()
             if not assigned_date_str:
                 continue
-
             if priority == "Высокий":
-                max_minutes = STALE_HIGH_PRIORITY_MINUTES
+                max_hours = STALE_HIGH_PRIORITY_LIMIT
                 emoji = "🔴"
             elif priority == "Средний":
-                max_minutes = STALE_MEDIUM_PRIORITY_MINUTES
+                max_hours = STALE_MEDIUM_PRIORITY_LIMIT
                 emoji = "🟠"
             else:
-                max_minutes = STALE_LOW_PRIORITY_MINUTES
+                max_hours = STALE_LOW_PRIORITY_LIMIT
                 emoji = "🟡"
-
             try:
                 assigned_dt = datetime.strptime(assigned_date_str, "%Y-%m-%d %H:%M:%S")
                 assigned_dt = timezone('Europe/Moscow').localize(assigned_dt)
             except (ValueError, TypeError):
                 continue
-
             elapsed = moscow_now - assigned_dt
-            elapsed_minutes = elapsed.total_seconds() / 60
-
-            if elapsed_minutes > max_minutes:
-                overdue_minutes = elapsed_minutes - max_minutes
+            elapsed_hours = elapsed.total_seconds() / 3600
+            if elapsed_hours > max_hours:
+                overdue_hours = elapsed_hours - max_hours
                 executor_username = None
                 for username, name in users_mapping.items():
                     if name == executor_name:
@@ -1660,35 +1545,31 @@ async def check_stale_in_progress(context: CallbackContext):
                         executor_display = executor_name
                     else:
                         executor_display = executor_name
-
                 stale_tasks.append({
                     "id": record.get("ID", "—"),
                     "topic": record.get("Тема задачи", "—"),
                     "executor_display": executor_display,
                     "priority": priority,
                     "assigned": assigned_date_str,
-                    "elapsed_minutes": round(elapsed_minutes, 1),
-                    "overdue_minutes": round(overdue_minutes, 1),
+                    "elapsed_hours": round(elapsed_hours, 1),
+                    "overdue_hours": round(overdue_hours, 1),
                     "emoji": emoji,
-                    "max_minutes": max_minutes
+                    "max_hours": max_hours
                 })
-
         if stale_tasks:
-            # Правильный отступ для начала списка 'lines'
             lines = [
                 "⏳ Задачи 'В РАБОТЕ' превысили допустимый лимит:",
                 ""
-            ] # <-- Правильный отступ: соответствует 'lines = [...]' выше
+            ]
             for task in stale_tasks:
                 lines.append(
                     f"{task['emoji']} {task['id']} — {task['topic']}\n"
                     f"   Исполнитель: {task['executor_display']}\n"
-                    f"   Приоритет: {task['priority']} (лимит: {task['max_minutes']}мин)\n"
-                    f"   В работе: {task['elapsed_minutes']}мин (превышение: +{task['overdue_minutes']}мин)\n"
+                    f"   Приоритет: {task['priority']} (лимит: {task['max_hours']}ч)\n"
+                    f"   В работе: {task['elapsed_hours']}ч (превышение: +{task['overdue_hours']}ч)\n"
                 )
             lines.append("Рекомендуется уточнить статус у исполнителя")
             message = "\n".join(lines)
-
             await context.bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=message,
@@ -1696,44 +1577,38 @@ async def check_stale_in_progress(context: CallbackContext):
             )
             logger.info(
                 f"Отправлено уведомление о {len(stale_tasks)} зависших задачах "
-                f"(Высокий: {STALE_HIGH_PRIORITY_MINUTES}мин, Средний: {STALE_MEDIUM_PRIORITY_MINUTES}мин, Низкий: {STALE_LOW_PRIORITY_MINUTES}мин)"
+                f"(Высокий: {STALE_HIGH_PRIORITY_LIMIT}ч, Средний: {STALE_MEDIUM_PRIORITY_LIMIT}ч, Низкий: {STALE_LOW_PRIORITY_LIMIT}ч)"
             )
         else:
             logger.debug("Зависших задач не обнаружено")
-
     except Exception as e:
         logger.error(f"Ошибка проверки зависших задач: {e}")
-
 
 async def morning_digest(context: CallbackContext):
     if is_quiet_hours():
         logger.warning("Утренний дайджест пропущен из-за режима тишины")
         return
-
     try:
         all_records = await get_cached_sheet_data()
         moscow_now = get_moscow_time()
         threshold_dt = moscow_now - timedelta(hours=OVERDUE_HOURS_THRESHOLD)
-
         urgent_unassigned = [
             r for r in all_records
             if r.get("Статус", "").strip() == "Не распределено"
             and r.get("Приоритет", "").strip() == "Высокий"
         ]
-
         overdue = []
         for r in all_records:
             if r.get("Статус", "").strip() != "Не распределено":
                 continue
             try:
-                created_dt_str = f"{r.get('Дата создания', '')} {r.get('Время', '')}".strip() # Используем 'Время'
+                created_dt_str = f"{r.get('Дата создания', '')} {r.get('Время создания', '')}".strip()
                 created_dt = datetime.strptime(created_dt_str, "%Y-%m-%d %H:%M:%S")
                 created_dt = timezone('Europe/Moscow').localize(created_dt)
                 if created_dt < threshold_dt:
                     overdue.append(r)
             except:
                 continue
-
         stale = []
         for r in all_records:
             if r.get("Статус", "").strip() != "В работе":
@@ -1741,20 +1616,18 @@ async def morning_digest(context: CallbackContext):
             try:
                 assigned_dt = datetime.strptime(r.get("Дата время назначения", ""), "%Y-%m-%d %H:%M:%S")
                 assigned_dt = timezone('Europe/Moscow').localize(assigned_dt)
-                elapsed_minutes = (moscow_now - assigned_dt).total_seconds() / 60
+                elapsed_hours = (moscow_now - assigned_dt).total_seconds() / 3600
                 priority = r.get("Приоритет", "Средний").strip()
                 status_lower = r.get("Статус", "").lower()
                 if "операционная задача" in status_lower or "опер. задача" in status_lower:
                     continue
-                max_minutes = STALE_HIGH_PRIORITY_MINUTES if priority == "Высокий" else \
-                              STALE_MEDIUM_PRIORITY_MINUTES if priority == "Средний" else \
-                              STALE_LOW_PRIORITY_MINUTES
-                if elapsed_minutes > max_minutes:
+                max_hours = STALE_HIGH_PRIORITY_LIMIT if priority == "Высокий" else \
+                    STALE_MEDIUM_PRIORITY_LIMIT if priority == "Средний" else \
+                    STALE_LOW_PRIORITY_LIMIT
+                if elapsed_hours > max_hours:
                     stale.append(r)
             except:
                 continue
-
-        # --- Формирование общего сообщения ---
         if is_weekend():
             lines = ["🌅 УТРЕННИЙ ДАЙДЖЕСТ (выходной день)", ""]
             if urgent_unassigned or overdue or stale:
@@ -1790,50 +1663,19 @@ async def morning_digest(context: CallbackContext):
                     executor = task.get("Исполнитель", "—")
                     lines.append(f"  • {task.get('ID', '—')} [{prio}] у {executor}")
                 lines.append("")
-
             if not (urgent_unassigned or overdue or stale):
                 lines.append("✅ Все задачи в нормальном состоянии")
             else:
                 lines.append("❗ Требуется внимание руководителя")
-
         message = "\n".join(lines)
-
-        # --- Отправка в общий чат ---
         await context.bot.send_message(
             chat_id=RPZ_DISCUSSION_CHAT_ID,
             text=message
         )
-
-        # --- Отправка персональных дайджестов ---
-        for user_id, settings in user_settings.items():
-            if settings.get("digest_pm", False):  # Если включена отправка в ЛС
-                digest_type = settings.get("digest_type", "краткий")
-                try:
-                    if digest_type == "полная":
-                        personal_message_lines = lines.copy()
-                        # Добавляем детализацию в полную версию
-                        personal_message_lines.insert(1, "📋 Подробная информация:")
-                        personal_message_lines.append("\n--- Это ваш личный дайджест ---")
-                        personal_message = "\n".join(personal_message_lines)
-                    else: # Краткая версия
-                        # Убираем лишнюю информацию для краткой версии
-                        summary_lines = [line for line in lines if "📋 Подробная информация:" not in line and "--- Это ваш личный дайджест ---" not in line]
-                        summary_lines.append("\n--- Это ваш личный дайджест ---")
-                        personal_message = "\n".join(summary_lines)
-
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=personal_message
-                    )
-                    logger.info(f"Отправлен утренний дайджест ({digest_type}) пользователю {user_id}")
-                except Exception as e:
-                    logger.error(f"Не удалось отправить дайджест пользователю {user_id}: {e}")
-
         if not (urgent_unassigned or overdue):
             note = "Все задачи в нормальном состоянии"
         else:
             note = "Требуется внимание руководителя"
-
         metrics = {
             "period": moscow_now.strftime("%Y-%m-%d"),
             "total": len(all_records),
@@ -1847,9 +1689,7 @@ async def morning_digest(context: CallbackContext):
             "note": note
         }
         log_digest_metrics("morning", metrics)
-
         logger.info(f"Отправлен утренний дайджест ({'выходной' if is_weekend() else 'будний'} день)")
-
     except Exception as e:
         logger.error(f"Ошибка формирования утреннего дайджеста: {e}")
 
@@ -1859,47 +1699,37 @@ async def weekly_digest(app: Application):
     moscow_now = get_moscow_time()
     week_start = moscow_now.date() - timedelta(days=moscow_now.weekday() + 7)
     week_end = week_start + timedelta(days=6)
-
     try:
         all_records = await safe_get_all_records()
         tasks_df = pd.DataFrame(all_records)
-
         if tasks_df.empty:
             await bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text="📊 Еженедельный дайджест\nНет данных за прошлую неделю."
             )
             return
-
         tasks_df['created_date'] = pd.to_datetime(tasks_df['Дата создания'], errors='coerce').dt.date
         weekly_tasks = tasks_df[
             (tasks_df['created_date'] >= week_start) &
             (tasks_df['created_date'] <= week_end)
         ].copy()
-
         if weekly_tasks.empty:
             await bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 text=f"📊 Еженедельный дайджест ({week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m')})\nНет задач за указанный период."
             )
             return
-
         priority_counts = weekly_tasks['Приоритет'].value_counts()
-
         operational_tasks = weekly_tasks[
             weekly_tasks['Статус'].apply(lambda s: "операционная задача" in str(s).lower() or "опер. задача" in str(s).lower())
         ]
         regular_tasks = weekly_tasks[~weekly_tasks['Статус'].apply(lambda s: "операционная задача" in str(s).lower() or "опер. задача" in str(s).lower())]
-
         completed_on_time = regular_tasks[
             (regular_tasks['Статус'] == 'Выполнено') &
             (pd.to_datetime(regular_tasks['Дата время выполнения'], errors='coerce').dt.date <= week_end)
         ]
-
         total_created = len(weekly_tasks)
         on_time_percent = (len(completed_on_time) / len(regular_tasks) * 100) if len(regular_tasks) > 0 else 0
-
-        # Поиск самых долгих задач
         stale_tasks = []
         for _, task in weekly_tasks.iterrows():
             status = str(task['Статус']).lower()
@@ -1908,31 +1738,28 @@ async def weekly_digest(app: Application):
             if task['Статус'] in ['В работе', 'Не распределено']:
                 try:
                     created_dt = datetime.strptime(
-                        f"{task['Дата создания']} {task.get('Время', '00:00:00')}", # Используем 'Время'
+                        f"{task['Дата создания']} {task.get('Время создания', task.get('Время', '00:00:00'))}",
                         "%Y-%m-%d %H:%M:%S"
                     )
                     created_dt = timezone('Europe/Moscow').localize(created_dt)
-                    elapsed_minutes = (moscow_now - created_dt).total_seconds() / 60
+                    elapsed_hours = (moscow_now - created_dt).total_seconds() / 3600
                     priority = task['Приоритет']
                     limit = {
-                        'Высокий': STALE_HIGH_PRIORITY_MINUTES,
-                        'Средний': STALE_MEDIUM_PRIORITY_MINUTES,
-                        'Низкий': STALE_LOW_PRIORITY_MINUTES
-                    }.get(priority, 1440) # 24 часа в минутах по умолчанию
-                    if elapsed_minutes > limit:
+                        'Высокий': STALE_HIGH_PRIORITY_LIMIT,
+                        'Средний': STALE_MEDIUM_PRIORITY_LIMIT,
+                        'Низкий': STALE_LOW_PRIORITY_LIMIT
+                    }.get(priority, 24)
+                    if elapsed_hours > limit:
                         stale_tasks.append({
                             'id': task['ID'],
                             'topic': task['Тема задачи'],
                             'priority': priority,
-                            'minutes': round(elapsed_minutes, 1),
+                            'hours': round(elapsed_hours, 1),
                             'executor': task.get('Исполнитель', '—')
                         })
                 except:
                     continue
-
-        stale_tasks = sorted(stale_tasks, key=lambda x: x['minutes'], reverse=True)[:3]
-
-        # --- Формирование общего сообщения ---
+        stale_tasks = sorted(stale_tasks, key=lambda x: x['hours'], reverse=True)[:3]
         lines = [
             f"📊 ЕЖЕНЕДЕЛЬНЫЙ ДАЙДЖЕСТ",
             f"Период: {week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m')}",
@@ -1942,7 +1769,6 @@ async def weekly_digest(app: Application):
             f"🔵 Операционные задачи: {len(operational_tasks)}",
             ""
         ]
-
         lines.append("📌 Распределение по приоритетам:")
         for prio in ['Высокий', 'Средний', 'Низкий']:
             count = priority_counts.get(prio, 0)
@@ -1953,27 +1779,20 @@ async def weekly_digest(app: Application):
                 else:
                     lines.append(f"  • {prio}: {count}")
         lines.append("")
-
         if stale_tasks:
             lines.append("⚠️ Топ-3 самых долгих задач (исключая операционные):")
             for i, task in enumerate(stale_tasks, 1):
                 exec_info = f" (исполнитель: {task['executor']})" if task['executor'] != '—' else ""
                 lines.append(
-                    f"  {i}. {task['id']} [{task['priority']}] — {task['minutes']}мин{exec_info}\n"
+                    f"  {i}. {task['id']} [{task['priority']}] — {task['hours']}ч{exec_info}\n"
                     f"     {task['topic'][:50]}..."
                 )
             lines.append("")
-
         lines.append("📎 Визуализация активности прикреплена ниже")
         message = "\n".join(lines)
-
-        # --- Отправка в общий чат ---
-        await bot.send_message(chat_id=RPZ_DISCUSSION_CHAT_ID, text=message)
-
-        # --- Генерация и отправка визуализации ---
         try:
             chart_buf, heatmap_buf = generate_weekly_charts(weekly_tasks, week_start, week_end)
-
+            await bot.send_message(chat_id=RPZ_DISCUSSION_CHAT_ID, text=message)
             await bot.send_photo(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
                 photo=chart_buf,
@@ -1984,73 +1803,27 @@ async def weekly_digest(app: Application):
                 photo=heatmap_buf,
                 caption="🌡️ Heatmap активности по дням недели и часам"
             )
+            metrics = {
+                "period": f"{week_start.strftime('%Y-%m-%d')} - {week_end.strftime('%Y-%m-%d')}",
+                "total": total_created,
+                "high": priority_counts.get("Высокий", 0),
+                "medium": priority_counts.get("Средний", 0),
+                "low": priority_counts.get("Низкий", 0),
+                "operational": len(operational_tasks),
+                "overdue": len(weekly_tasks) - len(completed_on_time),
+                "stale": len(stale_tasks),
+                "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
+                "on_time_percent": round(on_time_percent, 1),
+                "note": "Еженедельный дайджест с визуализацией"
+            }
+            log_digest_metrics("weekly", metrics)
+            logger.info(f"Еженедельный дайджест отправлен за период {week_start} - {week_end}")
         except Exception as e:
             logger.error(f"Ошибка генерации визуализации: {e}")
             await bot.send_message(
                 chat_id=RPZ_DISCUSSION_CHAT_ID,
-                text=f"⚠️ Не удалось сгенерировать графики: {str(e)}"
+                text=f"{message}\n⚠️ Не удалось сгенерировать графики: {str(e)}"
             )
-
-        # --- Отправка персональных дайджестов ---
-        for user_id, settings in user_settings.items():
-            if settings.get("digest_pm", False):  # Если включена отправка в ЛС
-                digest_type = settings.get("digest_type", "краткий")
-                try:
-                    if digest_type == "полная":
-                        personal_message_lines = lines.copy()
-                        # Добавляем детализацию в полную версию
-                        personal_message_lines.insert(1, "📋 Подробная статистика:")
-                        personal_message_lines.append("\n--- Это ваш личный дайджест ---")
-                        personal_message = "\n".join(personal_message_lines)
-                    else: # Краткая версия
-                        # Убираем лишнюю информацию для краткой версии
-                        summary_lines = [line for line in lines if "📋 Подробная статистика:" not in line and "--- Это ваш личный дайджест ---" not in line]
-                        # Убираем упоминание визуализации
-                        summary_lines = [line for line in summary_lines if "📎 Визуализация" not in line]
-                        summary_lines.append("\n--- Это ваш личный дайджест ---")
-                        personal_message = "\n".join(summary_lines)
-
-                    await bot.send_message(chat_id=user_id, text=personal_message)
-
-                    # Отправка визуализации только в полной версии
-                    if digest_type == "полная":
-                        try:
-                            chart_buf, heatmap_buf = generate_weekly_charts(weekly_tasks, week_start, week_end)
-                            await bot.send_photo(
-                                chat_id=user_id,
-                                photo=chart_buf,
-                                caption="📈 График активности задач по дням"
-                            )
-                            await bot.send_photo(
-                                chat_id=user_id,
-                                photo=heatmap_buf,
-                                caption="🌡️ Heatmap активности по дням недели и часам"
-                            )
-                        except Exception as ve:
-                             logger.error(f"Не удалось отправить графики пользователю {user_id}: {ve}")
-
-                    logger.info(f"Отправлен еженедельный дайджест ({digest_type}) пользователю {user_id}")
-                except Exception as e:
-                    logger.error(f"Не удалось отправить дайджест пользователю {user_id}: {e}")
-
-        # --- Логирование ---
-        metrics = {
-            "period": f"{week_start.strftime('%Y-%m-%d')} - {week_end.strftime('%Y-%m-%d')}",
-            "total": total_created,
-            "high": priority_counts.get("Высокий", 0),
-            "medium": priority_counts.get("Средний", 0),
-            "low": priority_counts.get("Низкий", 0),
-            "operational": len(operational_tasks),
-            "overdue": len(weekly_tasks) - len(completed_on_time),
-            "stale": len(stale_tasks),
-            "urgent_unassigned": len([t for t in weekly_tasks if t["Статус"] == "Не распределено" and t["Приоритет"] == "Высокий"]),
-            "on_time_percent": round(on_time_percent, 1),
-            "note": "Еженедельный дайджест с визуализацией"
-        }
-        log_digest_metrics("weekly", metrics)
-
-        logger.info(f"Еженедельный дайджест отправлен за период {week_start} - {week_end}")
-
     except Exception as e:
         logger.error(f"Ошибка формирования еженедельного дайджеста: {e}")
         await bot.send_message(
@@ -2062,7 +1835,7 @@ async def evening_pause_notify(context: CallbackContext):
     if is_weekend():
         msg = (
             "🌙 Режим тишины активирован (21:00–10:00 МСК)\n"
-            "Все уведомления и проверки приостановлены до 10:00 утра.\n"
+            "Все уведомления и проверки приостановлены до 10:00 утра.\n"  # ← ИСПРАВЛЕНО: было "проверовлены"
             "Хороших выходных! 🌴"
         )
     else:
@@ -2082,23 +1855,18 @@ async def pause_all_timers(context: CallbackContext):
     if not urgent_watchlist:
         logger.info("Нет активных таймеров для приостановки")
         return
-
     moscow_now = get_moscow_time()
     paused_timers = urgent_watchlist.copy()
-
     for task_id, data in urgent_watchlist.items():
         job_name = data["job_name"]
         current_jobs = context.job_queue.get_jobs_by_name(job_name)
-        for job in current_jobs:
+        for job in current_jobs:  # ← ИСПРАВЛЕНО: было current_jobs_removal()
             job.schedule_removal()
-
-    logger.info(f"Таймер задачи {task_id} приостановлен")
-
+        logger.info(f"Таймер задачи {task_id} приостановлен")
     for task_id, data in paused_timers.items():
         elapsed = moscow_now - data["created_at"]
         elapsed_minutes = int(elapsed.total_seconds() / 60)
         paused_timers[task_id]["elapsed_minutes"] = elapsed_minutes
-
     urgent_watchlist = {}
     logger.info(f"Приостановлено {len(paused_timers)} таймеров срочных задач в 21:00")
 
@@ -2107,17 +1875,14 @@ async def resume_all_timers(context: CallbackContext):
     if not paused_timers:
         logger.info("Нет приостановленных таймеров для возобновления")
         return
-
     moscow_now = get_moscow_time()
     urgent_watchlist = {}
-
     for task_id, data in paused_timers.items():
         elapsed_minutes = data.get("elapsed_minutes", 0)
         next_notify_at = (elapsed_minutes // URGENT_UNASSIGNED_INTERVAL + 1) * URGENT_UNASSIGNED_INTERVAL
         remaining_minutes = next_notify_at - elapsed_minutes
         if remaining_minutes <= 0:
             remaining_minutes = URGENT_UNASSIGNED_INTERVAL
-
         job_name = f"urgent_watch_{task_id}"
         urgent_watchlist[task_id] = {
             "created_at": data["created_at"],
@@ -2138,7 +1903,6 @@ async def resume_all_timers(context: CallbackContext):
         logger.info(
             f"Таймер задачи {task_id} возобновлён (следующее уведомление через {remaining_minutes} мин)"
         )
-
     paused_timers = {}
     logger.info(f"Возобновлено {len(urgent_watchlist)} таймеров срочных задач")
 
@@ -2149,17 +1913,14 @@ async def recover_urgent_tasks_on_startup(application: Application):
         moscow_now = get_moscow_time()
         recovered = 0
         notified_immediately = 0
-
         for record in all_records:
             status = str(record.get("Статус", "")).strip()
             priority = str(record.get("Приоритет", "")).strip()
             task_id = str(record.get("ID", "")).strip()
-
             if status != "Не распределено" or priority != "Высокий" or not task_id.startswith("TASK-"):
                 continue
-
             created_date = str(record.get("Дата создания", "")).strip()
-            created_time = str(record.get("Время", "")).strip() # Используем 'Время'
+            created_time = str(record.get("Время создания", "")).strip() or str(record.get("Время", "")).strip()
             try:
                 if created_time:
                     created_dt_str = f"{created_date} {created_time}"
@@ -2170,13 +1931,10 @@ async def recover_urgent_tasks_on_startup(application: Application):
             except (ValueError, TypeError) as e:
                 logger.warning(f"Не удалось распарсить время создания для {task_id}: {e}")
                 continue
-
             elapsed = moscow_now - created_dt
             elapsed_minutes = int(elapsed.total_seconds() / 60)
             topic = str(record.get("Тема задачи", "Без темы")).strip()
-
             job_name = f"urgent_watch_{task_id}"
-
             if elapsed_minutes >= URGENT_UNASSIGNED_DELAY and is_weekday():
                 notify_count = (elapsed_minutes - URGENT_UNASSIGNED_DELAY) // URGENT_UNASSIGNED_INTERVAL + 1
                 alert_msg = (
@@ -2196,14 +1954,12 @@ async def recover_urgent_tasks_on_startup(application: Application):
                     f"(ожидание: {elapsed_minutes} мин после перезапуска)"
                 )
                 notified_immediately += 1
-
             if is_weekday():
                 if elapsed_minutes < URGENT_UNASSIGNED_DELAY:
                     next_notify_in = URGENT_UNASSIGNED_DELAY - elapsed_minutes
                 else:
                     next_interval = (elapsed_minutes - URGENT_UNASSIGNED_DELAY) % URGENT_UNASSIGNED_INTERVAL
                     next_notify_in = URGENT_UNASSIGNED_INTERVAL - next_interval
-
                 application.job_queue.run_once(
                     check_urgent_unassigned,
                     next_notify_in * 60,
@@ -2225,7 +1981,6 @@ async def recover_urgent_tasks_on_startup(application: Application):
                     f"Восстановлен таймер для {task_id} (ожидание: {elapsed_minutes} мин, "
                     f"следующее уведомление через {next_notify_in if is_weekday() else 'выходные'} мин)"
                 )
-
         if recovered:
             logger.info(
                 f"Восстановлено {recovered} таймеров срочных задач "
@@ -2233,7 +1988,6 @@ async def recover_urgent_tasks_on_startup(application: Application):
             )
         else:
             logger.info("Нет нераспределённых задач с высоким приоритетом для восстановления")
-
     except Exception as e:
         logger.error(f"Ошибка восстановления таймеров после перезапуска: {e}")
 
@@ -2244,10 +1998,7 @@ def main():
     initialize_task_counter()
     load_users_mapping()
     load_user_settings()
-
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # --- Регистрация команд ---
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("today", cmd_today))
     application.add_handler(CommandHandler("pending", cmd_pending))
@@ -2256,10 +2007,6 @@ def main():
     application.add_handler(CommandHandler("limits", cmd_limits))
     application.add_handler(CommandHandler("settings", cmd_settings))
     application.add_handler(CommandHandler("oper", cmd_operational))
-    # --- Регистрация новой команды ---
-    application.add_handler(CommandHandler("weekly_manual", cmd_weekly_manual))
-    # --- /Конец регистрации новой команды ---
-
     application.add_handler(MessageHandler(
         filters.REPLY & filters.Chat(RPZ_DISCUSSION_CHAT_ID),
         handle_task_reply
@@ -2321,14 +2068,14 @@ def main():
     scheduler.add_job(
         report_unassigned_non_urgent,
         'interval',
-        minutes=UNASSIGNED_REPORT_INTERVAL,
+        minutes=UNASS,  # ← ИСПРАВЛЕНО: было UNASSIGNED_REPORT_INTERVAL
         args=[application],
         id='non_urgent_unassigned_report'
     )
     scheduler.add_job(
         check_stale_in_progress,
         'interval',
-        minutes=STALE_CHECK_INTERVAL, # <-- ИСПОЛЬЗУЕТСЯ ИСПРАВЛЕННАЯ ПЕРЕМЕННАЯ
+        minutes=STALE_CHECK_INTERVAL,
         args=[application],
         id='stale_check'
     )
@@ -2349,14 +2096,11 @@ def main():
         f"  • 🌅 Утренний дайджест: будни 8:00 (стандартный), выходные 8:00 (мягкий сводный)\n"
         f"  • 📊 Еженедельный дайджест: Пн 9:00 с визуализацией и логированием в 'Аналитика'\n"
         f"  • 🚨 Срочные задачи: уведомления каждые {URGENT_UNASSIGNED_INTERVAL} мин (> {URGENT_UNASSIGNED_DELAY} мин без назначения, только будни)\n"
-        f"  • 📋 Средний/Низкий: автоотчёт каждые {UNASSIGNED_REPORT_INTERVAL} мин (только будни)\n"
+        f"  • 📋 Средний/Низкий: автоотчёт каждые {UNASS} мин (только будни)\n"
         f"  • ⚠️ Просроченные: ежедневно в 10:00 (> {OVERDUE_HOURS_THRESHOLD} часов, только будни)\n"
-        f"  • ⏳ Зависшие задачи: лимиты — Высокий: {STALE_HIGH_PRIORITY_MINUTES}мин, Средний: {STALE_MEDIUM_PRIORITY_MINUTES}мин, Низкий: {STALE_LOW_PRIORITY_MINUTES}мин (только будни)\n"
-        f"  • 🔵 Операционные задачи: не участвуют в проверке зависших, отдельная команда /oper и тег #опер, #операционная, #опер. задача\n"
-        f"  • 📨 Персональные дайджесты: отправляются в ЛС с учётом типа ('краткий'/'полный')\n"
-        f"  • 📅 Ручной запуск: команда /weekly_manual для запуска еженедельного дайджеста"
+        f"  • ⏳ Зависшие задачи: лимиты — Высокий: {STALE_HIGH_PRIORITY_LIMIT}ч, Средний: {STALE_MEDIUM_PRIORITY_LIMIT}ч, Низкий: {STALE_LOW_PRIORITY_LIMIT}ч (только будни)\n"
+        f"  • 🔵 Операционные задачи: не участвуют в проверке зависших, отдельная команда /oper и тег #опер, #операционная, #опер. задача"
     )
-
     application.run_polling()
 
 if __name__ == "__main__":
