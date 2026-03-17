@@ -8,6 +8,7 @@ from telegram.ext import (
     Application, MessageHandler, CommandHandler, filters,
     ContextTypes, CallbackContext, CallbackQueryHandler
 )
+from telegram.request import HTTPXRequest  # ← ДОБАВЛЕНО: для увеличенных таймаутов
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -100,6 +101,7 @@ users_mapping = {}
 urgent_watchlist = {}
 paused_timers = {}
 user_settings = {}  # {user_id: {"digest_pm": bool, "digest_type": str}}
+weekly_digest_running = False  # ← ЗАЩИТА ОТ ДУБЛИРОВАНИЯ
 # ======================
 # Вспомогательные функции
 # ======================
@@ -378,7 +380,7 @@ def log_digest_metrics(digest_type: str, metrics: dict):
     except Exception as e:
         logger.error(f"Ошибка записи метрик дайджеста в 'Аналитика': {e}")
 # ======================
-# Визуализация для еженедельного дайджеста
+# Визуализация для еженедельного дайджеста (ОПТИМИЗИРОВАНА)
 # ======================
 def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tuple[io.BytesIO, io.BytesIO]:
     """Генерация графика активности и heatmap (оптимизированная версия)"""
@@ -409,7 +411,7 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         plt.tight_layout()
         
         chart_buf = io.BytesIO()
-        plt.savefig(chart_buf, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(chart_buf, format='png', dpi=100, bbox_inches='tight')  # ← ОПТИМИЗАЦИЯ: dpi=100
         plt.close(fig1)
         chart_buf.seek(0)
         
@@ -454,7 +456,7 @@ def generate_weekly_charts(tasks_df: pd.DataFrame, week_start, week_end) -> Tupl
         plt.tight_layout()
         
         heatmap_buf = io.BytesIO()
-        plt.savefig(heatmap_buf, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(heatmap_buf, format='png', dpi=100, bbox_inches='tight')  # ← ОПТИМИЗАЦИЯ: dpi=100
         plt.close(fig2)
         heatmap_buf.seek(0)
         
@@ -659,10 +661,20 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск еженедельного дайджеста"""
+    global weekly_digest_running  # ← ЗАЩИТА ОТ ДУБЛИРОВАНИЯ
+    
     user = update.effective_user
     if not is_allowed_user(user.id):
         await update.message.reply_text("❌ У вас нет прав для запуска этого отчёта.")
         return
+    
+    # ← ЗАЩИТА: если уже выполняется — выходим
+    if weekly_digest_running:
+        await update.message.reply_text(
+            "⏳ Еженедельный дайджест уже формируется. Пожалуйста, подождите..."
+        )
+        return
+    
     await update.message.reply_text("⏳ Формирую еженедельный дайджест...")
     try:
         await weekly_digest(context.application)
@@ -1697,6 +1709,7 @@ async def morning_digest(context: CallbackContext):
             "overdue": len(overdue),
             "stale": len(stale),
             "urgent_unassigned": len(urgent_unassigned),
+            "on_time_percent": 0,  # ← Для morning_digest всегда 0
             "note": note
         }
         log_digest_metrics("morning", metrics)
@@ -1706,12 +1719,21 @@ async def morning_digest(context: CallbackContext):
 
 async def weekly_digest(app: Application):
     """Еженедельный дайджест по понедельникам в 9:00"""
+    global weekly_digest_running  # ← ЗАЩИТА ОТ ДУБЛИРОВАНИЯ
+    
+    # ← ЗАЩИТА: если уже выполняется — выходим
+    if weekly_digest_running:
+        logger.warning("Еженедельный дайджест уже выполняется, пропускаем повторный запуск")
+        return
+    
+    weekly_digest_running = True  # ← Установить флаг
+    
     bot = app.bot
     moscow_now = get_moscow_time()
     week_start = moscow_now.date() - timedelta(days=moscow_now.weekday() + 7)
     week_end = week_start + timedelta(days=6)
     
-    # ← ДОБАВЛЕНО: инициализация message в начале функции
+    # ← ИНИЦИАЛИЗАЦИЯ message в начале функции
     message = "📊 Еженедельный дайджест"
     
     try:
@@ -1738,7 +1760,7 @@ async def weekly_digest(app: Application):
             )
             return
         
-        # ← ДОБАВЛЕНО: ограничение на максимальное количество задач для визуализации
+        # ← ОГРАНИЧЕНИЕ: максимум 500 задач для визуализации
         if len(weekly_tasks) > 500:
             logger.warning(f"Слишком много задач ({len(weekly_tasks)}), используем выборку для графиков")
             viz_tasks = weekly_tasks.sample(n=500, random_state=42)
@@ -1790,7 +1812,6 @@ async def weekly_digest(app: Application):
         
         stale_tasks = sorted(stale_tasks, key=lambda x: x['hours'], reverse=True)[:3]
         
-        # ← Формирование message
         lines = [
             f"📊 ЕЖЕНЕДЕЛЬНЫЙ ДАЙДЖЕСТ",
             f"Период: {week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m')}",
@@ -1823,7 +1844,7 @@ async def weekly_digest(app: Application):
         message = "\n".join(lines)
         
         try:
-            # ← ДОБАВЛЕНО: таймаут на генерацию графиков
+            # ← ТАЙМАУТ на генерацию графиков (30 секунд)
             chart_buf, heatmap_buf = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
                     None,
@@ -1832,7 +1853,7 @@ async def weekly_digest(app: Application):
                     week_start,
                     week_end
                 ),
-                timeout=30  # 30 секунд максимум
+                timeout=30
             )
             
             await bot.send_message(chat_id=RPZ_DISCUSSION_CHAT_ID, text=message)
@@ -1882,6 +1903,8 @@ async def weekly_digest(app: Application):
             chat_id=RPZ_DISCUSSION_CHAT_ID,
             text=f"❌ Ошибка при формировании еженедельного дайджеста: {str(e)}"
         )
+    finally:
+        weekly_digest_running = False  # ← СБРОСИТЬ флаг в любом случае
 
 async def evening_pause_notify(context: CallbackContext):
     if is_weekend():
@@ -2047,10 +2070,44 @@ async def recover_urgent_tasks_on_startup(application: Application):
 # Запуск бота
 # ======================
 def main():
+    import time
+    
     initialize_task_counter()
     load_users_mapping()
     load_user_settings()
-    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # ← ПОВТОРНЫЕ ПОПЫТКИ ПОДКЛЮЧЕНИЯ К TELEGRAM API
+    max_retries = 5
+    retry_delay = 5
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Попытка подключения к Telegram API ({attempt}/{max_retries})...")
+            
+            # ← УВЕЛИЧЕННЫЕ ТАЙМАУТЫ для HTTPXRequest
+            application = Application.builder().token(BOT_TOKEN).request(
+                HTTPXRequest(
+                    connect_timeout=30,  # ← Было 10, стало 30
+                    read_timeout=30,     # ← Было 10, стало 30
+                    write_timeout=30,    # ← Было 10, стало 30
+                    pool_timeout=30      # ← Было 10, стало 30
+                )
+            ).build()
+            
+            # Проверка подключения
+            asyncio.get_event_loop().run_until_complete(application.bot.get_me())
+            logger.info("✅ Подключение к Telegram API успешно")
+            break
+            
+        except Exception as e:
+            logger.warning(f"Попытка {attempt} не удалась: {e}")
+            if attempt < max_retries:
+                logger.info(f"Повтор через {retry_delay} секунд...")
+                time.sleep(retry_delay)
+            else:
+                logger.error("❌ Не удалось подключиться к Telegram API после всех попыток")
+                raise
+    
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("today", cmd_today))
     application.add_handler(CommandHandler("pending", cmd_pending))
@@ -2069,9 +2126,12 @@ def main():
         handle_new_task
     ))
     application.add_handler(CallbackQueryHandler(settings_callback, pattern="^toggle_digest_"))
+    
     async def startup_recovery(app):
         await recover_urgent_tasks_on_startup(app)
+    
     application.post_init = startup_recovery
+    
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(
         evening_pause_notify,
@@ -2113,7 +2173,7 @@ def main():
         minute=0,
         args=[application],
         id='weekly_digest',
-        misfire_grace_time=3600
+        misfire_grace_time=300  # ← УМЕНЬШЕНО с 3600 до 300
     )
     scheduler.add_job(
         report_unassigned_non_urgent,
@@ -2138,6 +2198,7 @@ def main():
         id='overdue_check'
     )
     scheduler.start()
+    
     logger.info(
         "Бот запущен:\n"
         f"  • 🌙 Режим тишины: будни 21:00–8:00, выходные 21:00–10:00\n"
